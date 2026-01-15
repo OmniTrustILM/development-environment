@@ -72,6 +72,11 @@ services:
       - ASPNETCORE_URLS=http://+:8080
     volumes:
       - ./secrets/trusted_certificates.pem:/etc/ssl/certs/trusted_certificates.pem
+    healthcheck:
+      test: wget -O - http://localhost:8080/health | grep -q 'Healthy'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - auth-standalone
       - core-dev
@@ -110,6 +115,11 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - scheduler-standalone
       - core-dev
@@ -123,6 +133,11 @@ services:
     restart: unless-stopped
     ports:
       - 8110:8080
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - all
       - utils
@@ -151,6 +166,11 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+    healthcheck:
+      test: wget -O - http://localhost:8080/api/v1/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - core-standalone
       - core
@@ -163,6 +183,11 @@ services:
     restart: unless-stopped
     ports:
       - 8200:8080
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - common-credential-provider-standalone
       - all
@@ -182,6 +207,11 @@ services:
       - JDBC_URL=jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
       - JDBC_USERNAME=${DB_USERNAME}
       - JDBC_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - ejbca-ng-connector-standalone
       - all
@@ -217,6 +247,11 @@ services:
       - DATABASE_NAME=${DB_NAME}
       - DATABASE_USER=${DB_USERNAME}
       - DATABASE_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/v1/health | grep -q '{"status":"ok"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - hashicorp-vault-connector-standalone
       - all
@@ -248,6 +283,11 @@ services:
       - JDBC_URL=jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
       - JDBC_USERNAME=${DB_USERNAME}
       - JDBC_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - keystore-entity-provider-standalone
       - all
@@ -263,6 +303,11 @@ services:
       - JDBC_URL=jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
       - JDBC_USERNAME=${DB_USERNAME}
       - JDBC_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - software-cryptography-provider-standalone
       - all
@@ -278,6 +323,11 @@ services:
       - JDBC_URL=jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
       - JDBC_USERNAME=${DB_USERNAME}
       - JDBC_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - ip-discovery-provider-standalone
       - all
@@ -292,9 +342,15 @@ services:
       - JDBC_URL=jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
       - JDBC_USERNAME=${DB_USERNAME}
       - JDBC_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - cryptosense-discovery-provider-standalone
       - all
+
   ct-logs-discovery-provider:
     container_name: ct-logs-discovery-provider
     image: czertainly-ct-logs-discovery-provider
@@ -308,6 +364,11 @@ services:
       - DATABASE_NAME=${DB_NAME}
       - DATABASE_USER=${DB_USERNAME}
       - DATABASE_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/v1/health | grep -q '{"status":"ok"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - ct-logs-discovery-provider-standalone
       - all
@@ -319,6 +380,11 @@ services:
     restart: unless-stopped
     ports:
       - 8250:8080
+    healthcheck:
+      test: wget -O - http://localhost:8080/v1/health | grep -q '{"status":"ok"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - x509-compliance-provider-standalone
       - all
@@ -337,6 +403,11 @@ services:
       - SMTP_HOST=${SMTP_HOST}
       - SMTP_USERNAME=${SMTP_USERNAME}
       - SMTP_PASSWORD=${SMTP_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - email-notification-provider-standalone
       - all
@@ -352,6 +423,11 @@ services:
       - JDBC_URL=jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
       - JDBC_USERNAME=${DB_USERNAME}
       - JDBC_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles:
       - webhook-notification-provider-standalone
       - all
