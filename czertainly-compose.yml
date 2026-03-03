@@ -238,6 +238,45 @@ services:
       - pyadcs-connector-standalone
       - all
 
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vault
+    restart: on-failure:10
+    ports:
+      - "8201:8201"
+    environment:
+      VAULT_ADDR: 'http://0.0.0.0:8201'
+      VAULT_LOCAL_CONFIG: '{"listener": [{"tcp":{"address": "0.0.0.0:8201","tls_disable":"1"}}], "default_lease_ttl": "168h", "max_lease_ttl": "720h"}, "ui": true}'
+      VAULT_DEV_ROOT_TOKEN_ID: '00000000-0000-0000-0000-000000000000'
+      VAULT_TOKEN: '00000000-0000-0000-0000-000000000000'
+    cap_add:
+      - IPC_LOCK
+    privileged: true
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      retries: 5
+    command: server -dev -dev-root-token-id="00000000-0000-0000-0000-000000000000"
+    profiles:
+      - hashicorp-vault-connector-deps
+      - hashicorp-vault-connector-standalone
+
+  vault-init:
+    image: hashicorp/vault:latest
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: http://vault:8201
+      VAULT_TOKEN: '00000000-0000-0000-0000-000000000000'
+    volumes:
+      - ./files/vault-init.sh:/vault-init.sh:ro,Z
+      - ./files/vault-test-policy.hcl:/vault-test-policy.hcl:ro,Z
+    entrypoint: ["sh", "/vault-init.sh"]
+    profiles:
+      - hashicorp-vault-connector-deps
+      - hashicorp-vault-connector-standalone
+
   hashicorp-vault-connector:
     container_name: hashicorp-vault-connector
     image: czertainly-hashicorp-vault-connector
@@ -246,11 +285,13 @@ services:
     ports:
       - 8212:8080
     environment:
+      - LOG_LEVEL=DEBUG
       - DATABASE_HOST=${DB_HOST}
       - DATABASE_PORT=${DB_PORT}
       - DATABASE_NAME=${DB_NAME}
       - DATABASE_USER=${DB_USERNAME}
       - DATABASE_PASSWORD=${DB_PASSWORD}
+      - DATABASE_SSL_MODE=disable
     healthcheck:
       test: wget -O - http://localhost:8080/v1/health | grep -q '{"status":"ok"}'
       interval: 10s
@@ -259,6 +300,9 @@ services:
     profiles:
       - hashicorp-vault-connector-standalone
       - all
+    depends_on:
+      vault:
+        condition: service_healthy
 
   # ejbca-legacy-connector:
   #   container_name: ejbca-legacy-connector
