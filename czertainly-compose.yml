@@ -416,6 +416,22 @@ services:
       - email-notification-provider-standalone
       - all
   
+  timestamp-signature-formatter:
+    container_name: timestamp-signature-formatter
+    image: czertainly-timestamp-signature-formatter
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Timestamp-Formatter-Connector
+    restart: unless-stopped
+    ports:
+      - 8270:8080
+    healthcheck:
+      test: wget -O - http://localhost:8080/v1/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - timestamp-signature-formatter-standalone
+      - all
+
   webhook-notification-provider:
     container_name: webhook-notification-provider
     image: czertainly-webhook-notification-provider
