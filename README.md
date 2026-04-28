@@ -129,9 +129,9 @@ Additional user and roles can be added using the CZERTAINLY API or Administrator
 
 ## Administrator frontend
 
-To run the Administrator frontend and use the backend services for the development, you can start the development server in [CZERTAINLY-FE-Administrator](https://github.com/3KeyCompany/CZERTAINLY-FE-Administrator) repository.
+To run the Administrator frontend and use the backend services for the development, you can start the development server in [fe-administrator](https://github.com/OmniTrustILM/fe-administrator) repository.
 
-Create a `./src/setupProxy.cjs` file in the root of the repository with the following content:
+Create a `./src/setupProxy.js` file in the root of the repository with the following content:
 
 ```javascript
 const proxyConfig = {
@@ -142,21 +142,23 @@ const proxyConfig = {
                 changeOrigin: true,
                 secure: false,
                 headers: {
-                    // Base64Url encoded certificate of the CZERTAINLY Administrator
-                    'ssl-client-cert': 'MIIEtDCCApygAwIBAgIVAP15kVt62m8a4p52xmbCcNCiSx8qMA0GCSqGSIb3DQEBDQUAMCMxITAfBgNVBAMMGENaRVJUQUlOTFkgRHVtbXkgUm9vdCBDQTAeFw0yMjA4MDQwODEzMzFaFw00MjA3MzAwODEzMzFaMCMxITAfBgNVBAMMGENaRVJUQUlOTFkgQWRtaW5pc3RyYXRvcjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL%2FPWoJN2ieDZkp1JggrXjhDm%2FxrqX6acAmyqzBQujCUrbjFF8l1qdtI0fZyFrZBLeVHCwqQUz0Afjzj7FBMNP2ljVLrQbMfyjJG10NvuPOa9dP%2FVolgF4CRRg0Ebg5CCd0s3yZR%2FgIc6cl9x0Ruk8uRCpM4jZ7Y%2B%2F7jhf4%2Bc8mBlp2aRlAJtV3JOYQlux17IpJdJrngX%2FlKoZcp4zU9kQwunVxz5GBWhXGqMEcV6b7lGF5ocSlnrR3cUKZbdGbXcfK75%2BW4%2FLB6v6y9bR40R%2BIUd%2FmOuByQvqWyTCk5d2YWBmg%2FddPVFynb5a2%2BxjhJxBI%2B28iGXq6iroQrPouacv8CAwEAAaOB3jCB2zAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB%2FwQEAwIF4DATBgNVHSUEDDAKBggrBgEFBQcDAjAdBgNVHQ4EFgQUrUOz2v0EvBSHyemGXPnt7HaghBgwHwYDVR0jBBgwFoAU0%2FBNVjrmoD8XW%2FNVXeoxTIkD59YwZgYDVR0gBF8wXTBbBgRVHSAAMFMwUQYIKwYBBQUHAgIwRRpDVVRGODpUaGlzIGlzIGEgZHVtbXkgYWRtaW5pc3RyYXRvciBjZXJ0aWZpY2F0ZSBmb3IgdGVzdGluZyBwdXJwb3NlczANBgkqhkiG9w0BAQ0FAAOCAgEAWYlpEI8SCOnhKYpcp3n%2BBtaAoUrcwIckpzPPxNf%2B9LSKhPp4NEs%2BEGsfflz33IeEojck%2Bx%2FwBqggJdp7WrUsHz%2F0sAwCkrVjbh3Lx75msAqVqFUaX0gYbqstmbnHxqgcmseVkWmEHEOmdz0%2B%2FB0XrGagzQNW8EGW3PEv4yOCeqdgRt9Nyh%2BGUtVkavy%2BCkYRaIEHDGjtxJTMakXOaEU0tNmDoMBDQzLsqc75AYEeqlKvQs6vZICf%2BRltDaDgriSelE04PtjnIr6aKmWipFN2Wu8Zgi3qt7SSiMwk0OIvG4NGkOKckf5kRWlA6aLtkY2ABHObknIlJhfpU%2FsNN%2F5ma0c%2BrSXK2%2BPyDStxALMzM54GVfGpXmdR3fkEQ8mS35BU2l8Gp0mA%2FXi55eqWVXgxEDXph487O20HjGh%2BxHcI40ZObBIKvfD0kCi1sQcINpK6CGm0Jb1ojU%2BxFwgq2IhdJPrC7quEW3wEHCRQKGaTbSm6CfMdf3YOKgpIUrX5Da2wJN04RTOLxUvpQss%2Frup49Uq2pMGBPtAvtTzXyTJrw22bgBjJV%2Bjt60ZB0PVqRbaPa52hUMl7ewCGpVO2ByAcxoQ1%2BEnb28%2FSwDnW3rgsaCHOB0AzqzaQAwEbgAeUKDBxKwm0GqLIgMtGs7CaG58%2FKqZsMj8ADqqItY3XXAlhjb4%3D',
+                    // URL-encoded Base64 certificate of the ILM Administrator
+                    'ssl-client-cert': 'MIIEmDCCAoCgAwIBAgIUSpLD/%2BgTWhMxIlMog2Bdlm3CDjUwDQYJKoZIhvcNAQENBQAwGDEWMBQGA1UEAwwNRHVtbXkgUm9vdCBDQTAeFw0yNjA0MjAxNDQyMTdaFw00NjA0MTUxNDQyMTdaMBgxFjAUBgNVBAMMDUFkbWluaXN0cmF0b3IwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC00ipGosoB9c%2BJ0xNOZxeCBzVCO14OvQ1Wx1apYy6mIb9prbW%2BJDzzC9PV/Vq/3jARGe7n1nCklzGWESfGzBB%2BDXRO0z1A%2BBRJ2jDh6/wym4atB45R9dkfDbhTFmWVmNPVrc5qYkC3JJhmeuhJcz71XBsSL7l9/3qdruXB/ZeBHSkJLkHVoEviacejKGi9ajuNY0Oo4wY7GDN%2BS8RQP4X84kKxzJRSwcT883/kHq2b83pwSygxfLUcz0FLfJeGNf0NtD%2BACurznbUELrNDF/xYGJeCnxssmTOyx4BtzA0RLINw4ews8%2BmPW0frBoCmx7KpQheT7hWYTGZaumVCVCMbAgMBAAGjgdkwgdYwDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCBeAwEwYDVR0lBAwwCgYIKwYBBQUHAwIwHQYDVR0OBBYEFKP9zS5hQtIMB4Xhm3asjv/ZC0QpMB8GA1UdIwQYMBaAFKrDVRKMwNLPigRWgvEnfgyfERiyMGEGA1UdIARaMFgwVgYEVR0gADBOMEwGCCsGAQUFBwICMEAMPlRoaXMgaXMgYSBkdW1teSBhZG1pbmlzdHJhdG9yIGNlcnRpZmljYXRlIGZvciB0ZXN0aW5nIHB1cnBvc2VzMA0GCSqGSIb3DQEBDQUAA4ICAQBfCGjQPlYTy1J3o94tGlE26Jwy8b3z/x3zNjztZ4QX5wAIkiUoT24DcZsZp9rlKMHsr4Dcv/JcBKnNrfYD%2BESCEXcZcuUIBbv4oErY%2BfAsmp6gW62gQnDF6GZCfz%2BKiTy%2BvtB493yvbKFepNfI5lgnVh443iD3TSbFmQYfeWLYYyqwjgNxFnPffPZ6w2cV7xw5pmF3FI5RM5SBhSEl0U3Aqbvnklw3A5mHis4t4joaptksg%2ByVExt38azhS34eIkGUbiGKsfbgr7%2BqaaqX1MRSrjE5FVh9uCs5ALmHBiZ5iEX1i3NwmLoqth71%2BAD11yUgX6LGp/kc85OIk1mjkom27ncY%2BwQ5lSZKuK8Ts1zQSD8iGalL7RSNnRALr%2B97mDBeZJYBBGPiEYj7UUC0NKw7qcLQ5bowfHnBZUAZbXWdR5AJa7VsPDH6k9Cvy/R9h0miyQF2QMs3%2BmYHLNdLTzqSkUq9XYnZWbm7CwprH1dW2iW78PdfOtDl90MhbGkVR50xpHNC3hwdBe0hV9RIw46Qtwb8PZSJq8EFlNrSK0J7882JwG8CDhOBxgzQGAahv3wb0B1/W3LRVbR1D9UyvDKN121uw025lJ%2BrCTUJ5T%2BfepyQxdvkH%2BIrmNvkh0kcZISG1If4HASDWFN9OMjvNesiRFHgpNZ26Xh347DfNvNrXQ%3D%3D',
                 },
             },
         },
     },
 };
 
-module.exports = proxyConfig;
+export default proxyConfig;
 ```
 
 This will proxy the requests from the frontend to the backend services authenticated and authorized with the certificate in the `ssl-client-cert` header.
 
-> [!IMPORTANT]  
-> Change the values in the middleware according to your setup and desired configuration. For example, it is important to add certificates that should be trusted by services (e.g. Auth service) to `trusted_certificates.pem` secret.
+> [!IMPORTANT]
+> The `src/setupProxy.js` file is gitignored — each developer creates their own local copy. Do not commit this file.
+> The certificate value must be URL-encoded. To generate the value for your own certificate, use `python3 -c "import urllib.parse; print(urllib.parse.quote('<base64_cert>'))"`.
+> It is important to add certificates that should be trusted by the Auth service to `trusted_certificates.pem` (see [Trusted CA certificates](#trusted-ca-certificates)).
 
 ## Connectors and technologies
 
