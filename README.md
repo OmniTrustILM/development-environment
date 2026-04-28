@@ -23,9 +23,19 @@ Create a `.env` file in the root of the repository and update values. The `.env.
 
 ### Trusted CA certificates
 
-If you are using the self-signed or not publicly trusted certificates, you should add the CA certificate to the trusted certificates in the Docker. You can add the CA certificate to the `./secrtes/trusted_certificates.pem` file and it will be automatically mounted to the Docker containers.
+If you are using the self-signed or not publicly trusted certificates, you should add the CA certificate to the trusted certificates in the Docker. You can add the CA certificate to the `./secrets/trusted_certificates.pem` file and it will be automatically mounted to the Docker containers.
 
 The file contains the CA certificate in the PEM format. You can add multiple certificates to the file.
+
+> [!IMPORTANT]
+> The `./secrets/trusted_certificates.pem` file must exist before starting the services, otherwise Docker will fail to mount it. Create it before the first `docker compose up`, even if it is empty:
+> ```bash
+> touch secrets/trusted_certificates.pem
+> ```
+> If you are using the dummy certificates for development (see [Authentication](#authentication)), add the [ILM Dummy Root CA](https://github.com/OmniTrustILM/helm-charts/blob/main/dummy-certificates/certs/root-ca.cert.pem) to this file and restart the `auth` service:
+> ```bash
+> docker compose -f czertainly-compose.yml -f postgres-compose.yml --profile core restart auth
+> ```
 
 ## Quick start
 
@@ -96,13 +106,26 @@ Once the services are started, you can start the Core service in your favorite I
 
 ## Authentication
 
-CZERTAINLY authenticate the users using the client certificate on the mTLS enabled port. For the development purposes, you can use non-TLS port and simulate the authenticated user, you can send the `X-APP-CERTIFICATE` header with the Base64 encoded certificate.
+CZERTAINLY authenticate the users using the client certificate on the mTLS enabled port. For the development purposes, you can use non-TLS port and simulate the authenticated user by sending the `ssl-client-cert` header with the URL-encoded Base64 certificate.
 
-You can register the certificate for the first administrator using the [`Local API`](https://docs.czertainly.com/api/core-local/#tag/Local-operations/operation/addAdmin). For the development purposes, you can use the [`CZERTAINLY Administrator`](https://github.com/CZERTAINLY/CZERTAINLY-Helm-Charts/blob/main/dummy-certificates/certs/admin.cert.pem) certificate.
+> [!IMPORTANT]
+> The certificate value must be **URL-encoded** (e.g. `+` → `%2B`, `/` → `%2F`, `=` → `%3D`). Sending a plain Base64 value will cause the `+` characters to be interpreted as spaces, resulting in an authentication error.
+
+You can register the certificate for the first administrator using the [`Local API`](https://docs.czertainly.com/api/core-local/#tag/Local-operations/operation/addAdmin). For the development purposes, you can use the [`ILM Administrator`](https://github.com/OmniTrustILM/helm-charts/blob/main/dummy-certificates/certs/admin.cert.pem) certificate.
+
+> [!IMPORTANT]
+> The `Local API` is accessible **only from within the Core container**. When running with Docker Compose, use `docker exec` to call it:
+> ```bash
+> docker exec core curl -X POST \
+>   -H 'content-type: application/json' \
+>   -d @first-admin.json \
+>   http://localhost:8080/api/v1/local/admins
+> ```
+> Calling it directly from the host machine (e.g. `localhost:8280`) will return HTTP 401.
 
 To create the administrator, follow [Create Super Administrator](https://docs.czertainly.com/docs/certificate-key/installation-guide/create-super-administrator).
 
-Additional user and roles can be added using the CZERTAINLY API or Administator UI.
+Additional user and roles can be added using the CZERTAINLY API or Administrator UI.
 
 ## Administrator frontend
 
