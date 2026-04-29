@@ -109,19 +109,18 @@ Once the services are started, you can start the Core service in your favorite I
 CZERTAINLY authenticate the users using the client certificate on the mTLS enabled port. For the development purposes, you can use non-TLS port and simulate the authenticated user by sending the `ssl-client-cert` header with the URL-encoded Base64 certificate.
 
 > [!IMPORTANT]
-> The certificate value must be **URL-encoded** (e.g. `+` → `%2B`, `/` → `%2F`, `=` → `%3D`). Sending a plain Base64 value will cause the `+` characters to be interpreted as spaces, resulting in an authentication error.
+> The certificate value must be **URL-encoded** (e.g. `+` → `%2B`, `=` → `%3D`). Sending a plain Base64 value will cause the `+` characters to be interpreted as spaces, resulting in an authentication error.
 
 You can register the certificate for the first administrator using the [`Local API`](https://docs.czertainly.com/api/core-local/#tag/Local-operations/operation/addAdmin). For the development purposes, you can use the [`ILM Administrator`](https://github.com/OmniTrustILM/helm-charts/blob/main/dummy-certificates/certs/admin.cert.pem) certificate.
 
 > [!IMPORTANT]
-> The `Local API` is accessible **only from within the Core container**. When running with Docker Compose, use `docker exec` to call it:
+> The Local API listens only on the container's internal port `8080` and requires no authentication. The externally-mapped port `8280` exposes the regular API, which requires client-cert auth and returns HTTP 401 without one. Use `docker exec` to call the Local API from inside the container:
 > ```bash
 > docker exec core curl -X POST \
 >   -H 'content-type: application/json' \
 >   -d @first-admin.json \
 >   http://localhost:8080/api/v1/local/admins
 > ```
-> Calling it directly from the host machine (e.g. `localhost:8280`) will return HTTP 401.
 
 To create the administrator, follow [Create Super Administrator](https://docs.czertainly.com/docs/certificate-key/installation-guide/create-super-administrator).
 
@@ -157,7 +156,7 @@ This will proxy the requests from the frontend to the backend services authentic
 
 > [!IMPORTANT]
 > The `src/setupProxy.js` file is gitignored — each developer creates their own local copy. Do not commit this file.
-> The certificate value must be URL-encoded. To generate the value for your own certificate, use `python3 -c "import urllib.parse; print(urllib.parse.quote('<base64_cert>'))"`.
+> The certificate value must be URL-encoded. To generate the value for your own certificate, use `node -e "console.log(encodeURIComponent('<base64_cert>'))"`.
 > It is important to add certificates that should be trusted by the Auth service to `trusted_certificates.pem` (see [Trusted CA certificates](#trusted-ca-certificates)).
 
 ## Connectors and technologies
