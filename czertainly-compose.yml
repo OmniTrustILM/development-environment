@@ -58,7 +58,7 @@ services:
   auth:
     container_name: auth
     image: czertainly-auth
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Auth
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/auth
     restart: unless-stopped
     ports:
       - 8100:8080
@@ -86,7 +86,7 @@ services:
   opa-bundle-server:
     container_name: opa-bundles
     image: czertainly-opa-bundles
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Auth-OPA-Policies
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/auth-opa-policies
     restart: unless-stopped
     ports:
       - 8101:8080
@@ -99,7 +99,7 @@ services:
   scheduler:
     container_name: scheduler
     image: czertainly-scheduler
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Scheduler
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/scheduler
     restart: unless-stopped
     ports:
       - 8102:8080
@@ -107,11 +107,11 @@ services:
       - JDBC_URL=jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
       - JDBC_USERNAME=${DB_USERNAME}
       - JDBC_PASSWORD=${DB_PASSWORD}
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-      - RABBITMQ_USERNAME=guest
-      - RABBITMQ_PASSWORD=guest
-      - RABBITMQ_VHOST=
+      - BROKER_HOST=amqp://rabbitmq
+      - BROKER_PORT=5672
+      - BROKER_USERNAME=guest
+      - BROKER_PASSWORD=guest
+      - BROKER_VIRTUAL_HOST=
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -129,7 +129,7 @@ services:
   utils:
     container_name: utils
     image: czertainly-utils
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Utils-Service
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/utils-service
     restart: unless-stopped
     ports:
       - 8110:8080
@@ -146,7 +146,7 @@ services:
     container_name: core
     image: 3keycompany/czertainly-core:develop-latest
 #    image: czertainly-core
-#    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Core
+#    build: ${CZERTAINLY_SOURCES_BASE_DIR}/core
     restart: unless-stopped
     ports:
       - 8280:8080
@@ -157,11 +157,10 @@ services:
       - OPA_BASE_URL=http://opa:8181
       - AUTH_SERVICE_BASE_URL=http://auth:8080
       - SCHEDULER_BASE_URL=http://scheduler:8080
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-      - RABBITMQ_USERNAME=guest
-      - RABBITMQ_PASSWORD=guest
-      - RABBITMQ_VHOST=
+      - BROKER_URL=amqp://rabbitmq:5672
+      - BROKER_USERNAME=guest
+      - BROKER_PASSWORD=guest
+      - BROKER_VHOST=
       - LOGGING_LEVEL_COM_CZERTAINLY=DEBUG
     depends_on:
       rabbitmq:
@@ -179,7 +178,7 @@ services:
   common-credential-provider:
     container_name: common-credential-provider
     image: czertainly-common-credential-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Common-Credential-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/common-credential-provider
     restart: unless-stopped
     ports:
       - 8200:8080
@@ -200,7 +199,7 @@ services:
     container_name: ejbca-ng-connector
     image: czertainly-ejbca-ng-connector
     build: 
-      context: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-EJBCA-NG-Connector
+      context: ${CZERTAINLY_SOURCES_BASE_DIR}/ejbca-ng-connector
       args:
         - SERVER_USERNAME=${GITHUB_USERNAME}
         - SERVER_PASSWORD=${GITHUB_PASSWORD}
@@ -223,7 +222,7 @@ services:
   pyadcs-connector:
     container_name: pyadcs-connector
     image: czertainly-pyadcs-connector
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-PyADCS-Connector
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/pyadcs-connector
     restart: unless-stopped
     ports:
       - 8211:8080
@@ -241,7 +240,7 @@ services:
   hashicorp-vault-connector:
     container_name: hashicorp-vault-connector
     image: czertainly-hashicorp-vault-connector
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-HashiCorp-Vault-Connector
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/hashicorp-vault-connector
     restart: unless-stopped
     ports:
       - 8212:8080
@@ -263,7 +262,7 @@ services:
   # ejbca-legacy-connector:
   #   container_name: ejbca-legacy-connector
   #   image: czertainly-ejbca-legacy-connector
-  #   build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-EJBCA-Legacy-CA-Connector
+  #   build: ${CZERTAINLY_SOURCES_BASE_DIR}/EJBCA-Legacy-CA-Connector
   #   ports:
   #       - 8211:8080
   #   environment:
@@ -279,7 +278,7 @@ services:
   keystore-entity-provider:
     container_name: keystore-entity-provider
     image: czertainly-keystore-entity-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Keystore-Entity-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/keystore-entity-provider
     restart: unless-stopped
     ports:
       - 8220:8080
@@ -299,7 +298,7 @@ services:
   software-cryptography-provider:
     container_name: software-cryptography-provider
     image: czertainly-software-cryptography-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Software-Cryptography-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/software-cryptography-provider
     restart: unless-stopped
     ports:
       - 8230:8080
@@ -319,7 +318,7 @@ services:
   ip-discovery-provider:
     container_name: ip-discovery-provider
     image: czertainly-ip-discovery-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-IP-Discovery-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/ip-discovery-provider
     restart: unless-stopped
     ports:
       - 8240:8080
@@ -339,7 +338,7 @@ services:
   cryptosense-discovery-provider:
     container_name: cryptosense-discovery-provider
     image: czertainly-cryptosense-discovery-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Cryptosense-Discovery-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/cryptosense-discovery-provider
     ports:
       - 8241:8080
     environment:
@@ -358,7 +357,7 @@ services:
   ct-logs-discovery-provider:
     container_name: ct-logs-discovery-provider
     image: czertainly-ct-logs-discovery-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-CT-Logs-Discovery-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/ct-logs-discovery-provider
     restart: unless-stopped
     ports:
       - 8242:8080
@@ -380,7 +379,7 @@ services:
   x509-compliance-provider:
     container_name: x509-compliance-provider
     image: czertainly-x509-compliance-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-X509-Compliance-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/x509-compliance-provider
     restart: unless-stopped
     ports:
       - 8250:8080
@@ -396,7 +395,7 @@ services:
   email-notification-provider:
     container_name: email-notification-provider
     image: czertainly-email-notification-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Email-Notification-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/email-notification-provider
     restart: unless-stopped
     ports:
       - 8260:8080
@@ -419,7 +418,7 @@ services:
   webhook-notification-provider:
     container_name: webhook-notification-provider
     image: czertainly-webhook-notification-provider
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Webhook-Notification-Provider
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/webhook-notification-provider
     restart: unless-stopped
     ports:
       - 8261:8080
@@ -439,7 +438,7 @@ services:
   interface-docs:
     container_name: interface-docs
     image: czertainly-interface-docs
-    build: ${CZERTAINLY_SOURCES_BASE_DIR}/CZERTAINLY-Interface-Documentation
+    build: ${CZERTAINLY_SOURCES_BASE_DIR}/interface-documentation
     ports:
     - 8300:80
     profiles:
