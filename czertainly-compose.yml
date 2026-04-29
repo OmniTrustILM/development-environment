@@ -36,7 +36,7 @@ services:
 
   rabbitmq:
     container_name: rabbitmq
-    image: rabbitmq:4.2.0-management-alpine
+    image: rabbitmq:4.2.6-management-alpine
     restart: unless-stopped
     ports:
       - 5672:5672
@@ -44,6 +44,8 @@ services:
     volumes:
       - ./data/rabbitmq/data:/var/lib/rabbitmq
       - ./data/rabbitmq/logs:/var/log/rabbitmq
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
     healthcheck:
       test: [ "CMD", "rabbitmqctl", "status" ]
       interval: 10s
