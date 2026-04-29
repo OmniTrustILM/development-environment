@@ -1,0 +1,153 @@
+{
+    "users": [
+        {
+            "name": "guest",
+            "password": "guest",
+            "tags": [
+                "administrator"
+            ],
+            "limits": {
+            }
+        }
+    ],
+    "vhosts": [
+        {
+            "name": "/"
+        }
+    ],
+    "permissions": [
+        {
+            "user": "guest",
+            "vhost": "/",
+            "configure": ".*",
+            "write": ".*",
+            "read": ".*"
+        }
+    ],
+    "exchanges": [
+        {
+            "name": "czertainly",
+            "vhost": "/",
+            "type": "direct",
+            "durable": true,
+            "auto_delete": false,
+            "internal": false,
+            "arguments": {
+            }
+        }
+    ],
+    "queues": [
+        {
+            "name": "core.audit-logs",
+            "vhost": "/",
+            "durable": true,
+            "auto_delete": false,
+            "arguments": {
+            }
+        },
+        {
+            "name": "core.notifications",
+            "vhost": "/",
+            "durable": true,
+            "auto_delete": false,
+            "arguments": {
+            }
+        },
+        {
+            "name": "core.scheduler",
+            "vhost": "/",
+            "durable": true,
+            "auto_delete": false,
+            "arguments": {
+            }
+        },
+        {
+            "name": "core.actions",
+            "vhost": "/",
+            "durable": true,
+            "auto_delete": false,
+            "arguments": {
+            }
+        },
+        {
+            "name": "core.validation",
+            "vhost": "/",
+            "durable": true,
+            "auto_delete": false,
+            "arguments": {
+            }
+        },
+        {
+            "name": "core.events",
+            "vhost": "/",
+            "durable": true,
+            "auto_delete": false,
+            "arguments": {
+            }
+        },
+        {
+            "name": "core",
+            "vhost": "/",
+            "durable": true,
+            "auto_delete": false,
+            "arguments": {
+            }
+        }
+    ],
+    "bindings": [
+        {
+            "source": "czertainly",
+            "vhost": "/",
+            "destination": "core.audit-logs",
+            "destination_type": "queue",
+            "routing_key": "audit-logs",
+            "arguments": {
+            }
+        },
+        {
+            "source": "czertainly",
+            "vhost": "/",
+            "destination": "core.notifications",
+            "destination_type": "queue",
+            "routing_key": "notification",
+            "arguments": {
+            }
+        },
+        {
+            "source": "czertainly",
+            "vhost": "/",
+            "destination": "core.actions",
+            "destination_type": "queue",
+            "routing_key": "action",
+            "arguments": {
+            }
+        },
+        {
+            "source": "czertainly",
+            "vhost": "/",
+            "destination": "core.scheduler",
+            "destination_type": "queue",
+            "routing_key": "scheduler",
+            "arguments": {
+            }
+        },
+        {
+            "source": "czertainly",
+            "vhost": "/",
+            "destination": "core.validation",
+            "destination_type": "queue",
+            "routing_key": "validation",
+            "arguments": {
+            }
+        },
+        {
+            "source": "czertainly",
+            "vhost": "/",
+            "destination": "core.events",
+            "destination_type": "queue",
+            "routing_key": "event",
+            "arguments": {
+            }
+        }
+    ]
+}

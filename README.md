@@ -3,6 +3,20 @@
 This repository contains Docker Compose files and scripts that can be used to streamline development of the CZERTAINLY platform.
 There are couple of microservices that need to be running for the development. Depending on the service that is going to be developed, the compose will run the services.
 
+## Source repository directory naming
+
+The `build:` paths in `czertainly-compose.yml` reference source directories under `${CZERTAINLY_SOURCES_BASE_DIR}` using their lowercase repository names (matching the `OmniTrustILM/<repo>` GitHub convention) — for example `${CZERTAINLY_SOURCES_BASE_DIR}/auth`, `${CZERTAINLY_SOURCES_BASE_DIR}/scheduler`, `${CZERTAINLY_SOURCES_BASE_DIR}/ejbca-ng-connector`.
+
+> [!IMPORTANT]
+> If you previously cloned the sources under their old mixed-case names (e.g. `CZERTAINLY-Auth`, `CZERTAINLY-Scheduler`), rename the directories to the lowercase form before running `docker compose up`, otherwise the build will fail with `path not found`. Example one-liner:
+>
+> ```bash
+> for d in "$CZERTAINLY_SOURCES_BASE_DIR"/CZERTAINLY-*; do
+>   new="$(basename "$d" | sed 's/^CZERTAINLY-//' | tr '[:upper:]' '[:lower:]')"
+>   mv "$d" "$(dirname "$d")/$new"
+> done
+> ```
+
 ## Setup the environment variables
 
 Create a `.env` file in the root of the repository and update values. The `.env.example` file can be used as a template with the following values:
@@ -43,6 +57,21 @@ To stop the services, you can use the following command:
 ```bash
 docker-compose -f czertainly-compose.yml -f postgres-compose.yml --profile database --profile core down
 ```
+
+## RabbitMQ
+
+The `rabbitmq` service mounts `./rabbitmq/definitions.json` and `./rabbitmq/rabbitmq.conf` into the container. On boot the broker imports the topology (vhost, `czertainly` exchange, `core.*` queues, bindings, and the `guest` admin user) from `definitions.json`. The data directory is bind-mounted at `./data/rabbitmq/data` so broker state persists across restarts.
+
+> [!IMPORTANT]
+> If you upgrade an existing dev environment that already has data in `./data/rabbitmq/data` and the broker logs `PRECONDITION_FAILED` errors during definitions import (typically because previously-created queues have different attributes than the new declarations), wipe the persisted state and restart:
+>
+> ```bash
+> docker compose -f czertainly-compose.yml down
+> rm -rf ./data/rabbitmq/data
+> docker compose -f czertainly-compose.yml --profile core up
+> ```
+>
+> The next boot will import `definitions.json` against an empty Mnesia store and the topology will match the file exactly.
 
 ## Database
 
