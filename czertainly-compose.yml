@@ -5,7 +5,6 @@ secrets:
     file: ./secrets/trusted_certificates.pem
 
 services:
-
   opa:
     container_name: opa
     image: openpolicyagent/opa:1.10.0-static
@@ -47,7 +46,7 @@ services:
       - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
       - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
     healthcheck:
-      test: [ "CMD", "rabbitmqctl", "status" ]
+      test: ["CMD", "rabbitmqctl", "status"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -109,8 +108,7 @@ services:
       - JDBC_URL=jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
       - JDBC_USERNAME=${DB_USERNAME}
       - JDBC_PASSWORD=${DB_PASSWORD}
-      - BROKER_HOST=amqp://rabbitmq
-      - BROKER_PORT=5672
+      - BROKER_URL=amqp://rabbitmq:5672
       - BROKER_USERNAME=guest
       - BROKER_PASSWORD=guest
       - BROKER_VIRTUAL_HOST=
@@ -147,8 +145,8 @@ services:
   core:
     container_name: core
     image: 3keycompany/czertainly-core:develop-latest
-#    image: czertainly-core
-#    build: ${CZERTAINLY_SOURCES_BASE_DIR}/core
+    #    image: czertainly-core
+    #    build: ${CZERTAINLY_SOURCES_BASE_DIR}/core
     restart: unless-stopped
     ports:
       - 8280:8080
@@ -176,7 +174,7 @@ services:
       - core-standalone
       - core
       - all
-  
+
   common-credential-provider:
     container_name: common-credential-provider
     image: czertainly-common-credential-provider
@@ -200,7 +198,7 @@ services:
   ejbca-ng-connector:
     container_name: ejbca-ng-connector
     image: czertainly-ejbca-ng-connector
-    build: 
+    build:
       context: ${CZERTAINLY_SOURCES_BASE_DIR}/ejbca-ng-connector
       args:
         - SERVER_USERNAME=${GITHUB_USERNAME}
@@ -416,7 +414,7 @@ services:
     profiles:
       - email-notification-provider-standalone
       - all
-  
+
   webhook-notification-provider:
     container_name: webhook-notification-provider
     image: czertainly-webhook-notification-provider
