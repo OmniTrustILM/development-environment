@@ -262,7 +262,7 @@ services:
   # ejbca-legacy-connector:
   #   container_name: ejbca-legacy-connector
   #   image: czertainly-ejbca-legacy-connector
-  #   build: ${CZERTAINLY_SOURCES_BASE_DIR}/EJBCA-Legacy-CA-Connector
+  #   build: ${CZERTAINLY_SOURCES_BASE_DIR}/ejbca-legacy-ca-connector
   #   ports:
   #       - 8211:8080
   #   environment:
