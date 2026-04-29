@@ -58,6 +58,21 @@ To stop the services, you can use the following command:
 docker-compose -f czertainly-compose.yml -f postgres-compose.yml --profile database --profile core down
 ```
 
+## RabbitMQ
+
+The `rabbitmq` service mounts `./rabbitmq/definitions.json` and `./rabbitmq/rabbitmq.conf` into the container. On boot the broker imports the topology (vhost, `czertainly` exchange, `core.*` queues, bindings, and the `guest` admin user) from `definitions.json`. The data directory is bind-mounted at `./data/rabbitmq/data` so broker state persists across restarts.
+
+> [!IMPORTANT]
+> If you upgrade an existing dev environment that already has data in `./data/rabbitmq/data` and the broker logs `PRECONDITION_FAILED` errors during definitions import (typically because previously-created queues have different attributes than the new declarations), wipe the persisted state and restart:
+>
+> ```bash
+> docker compose -f czertainly-compose.yml down
+> rm -rf ./data/rabbitmq/data
+> docker compose -f czertainly-compose.yml --profile core up
+> ```
+>
+> The next boot will import `definitions.json` against an empty Mnesia store and the topology will match the file exactly.
+
 ## Database
 
 CZERTAINLY requires a PostgreSQL database to store the data. The database can be started in Docker using the `postgres-compose.yml` file or you can use your own database.
