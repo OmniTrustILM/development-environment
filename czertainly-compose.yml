@@ -160,7 +160,7 @@ services:
       - BROKER_URL=amqp://rabbitmq:5672
       - BROKER_USERNAME=guest
       - BROKER_PASSWORD=guest
-      - BROKER_VHOST=
+      - BROKER_VIRTUAL_HOST=
       - LOGGING_LEVEL_COM_CZERTAINLY=DEBUG
     depends_on:
       rabbitmq:
@@ -440,7 +440,7 @@ services:
     image: czertainly-interface-docs
     build: ${CZERTAINLY_SOURCES_BASE_DIR}/interface-documentation
     ports:
-    - 8300:80
+      - 8300:80
     profiles:
       - interface-docs-standalone
       - all
