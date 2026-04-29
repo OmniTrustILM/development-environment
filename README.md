@@ -3,6 +3,20 @@
 This repository contains Docker Compose files and scripts that can be used to streamline development of the CZERTAINLY platform.
 There are couple of microservices that need to be running for the development. Depending on the service that is going to be developed, the compose will run the services.
 
+## Source repository directory naming
+
+The `build:` paths in `czertainly-compose.yml` reference source directories under `${CZERTAINLY_SOURCES_BASE_DIR}` using their lowercase repository names (matching the `OmniTrustILM/<repo>` GitHub convention) — for example `${CZERTAINLY_SOURCES_BASE_DIR}/auth`, `${CZERTAINLY_SOURCES_BASE_DIR}/scheduler`, `${CZERTAINLY_SOURCES_BASE_DIR}/ejbca-ng-connector`.
+
+> [!IMPORTANT]
+> If you previously cloned the sources under their old mixed-case names (e.g. `CZERTAINLY-Auth`, `CZERTAINLY-Scheduler`), rename the directories to the lowercase form before running `docker compose up`, otherwise the build will fail with `path not found`. Example one-liner:
+>
+> ```bash
+> for d in "$CZERTAINLY_SOURCES_BASE_DIR"/CZERTAINLY-*; do
+>   new="$(basename "$d" | sed 's/^CZERTAINLY-//' | tr '[:upper:]' '[:lower:]')"
+>   mv "$d" "$(dirname "$d")/$new"
+> done
+> ```
+
 ## Setup the environment variables
 
 Create a `.env` file in the root of the repository and update values. The `.env.example` file can be used as a template with the following values:
