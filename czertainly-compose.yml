@@ -457,3 +457,45 @@ services:
     profiles:
       - ejbca-standalone
       - all
+
+  time-quality-monitor:
+    container_name: time-quality-monitor
+    image: czertainly-time-quality-monitor
+    build:
+      context: ${CZERTAINLY_SOURCES_BASE_DIR}/time-quality-monitor
+    restart: unless-stopped
+    environment:
+      - TQC_RABBITMQ_HOST=rabbitmq
+      - TQC_RABBITMQ_PORT=5672
+      - TQC_RABBITMQ_USERNAME=guest
+      - TQC_RABBITMQ_PASSWORD=guest
+      - TQC_RABBITMQ_VHOST=
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: wget -O - http://localhost:8080/health | grep -E -q '^\{"status":"UP"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - time-quality-monitor-standalone
+      - all
+
+  ntp:
+    container_name: ntp
+    image: czertainly-ntp
+    build: ./ntp
+    restart: unless-stopped
+    ports:
+      - 123:123/udp
+    cap_add:
+      - SYS_TIME
+    healthcheck:
+      test: chronyc -n tracking
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - ntp-standalone
+      - all
