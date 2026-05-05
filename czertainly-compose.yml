@@ -474,7 +474,7 @@ services:
       rabbitmq:
         condition: service_healthy
     healthcheck:
-      test: wget -O - http://localhost:8080/health/liveness | grep -q '{"status":"UP"}'
+      test: wget -O - http://localhost:8080/health | grep -E -q '^\{"status":"UP"'
       interval: 10s
       timeout: 5s
       retries: 5
