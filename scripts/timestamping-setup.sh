@@ -540,7 +540,9 @@ configure_authentication() {
     extract_p12_pem "$CLIENT_P12_BUNDLE" "$CLIENT_P12_PASSPHRASE" "$MTLS_CERT_PEM" "$MTLS_KEY_PEM"
     CURL_AUTH_ARGS=(--cert "$MTLS_CERT_PEM" --key "$MTLS_KEY_PEM")
   fi
-  [[ "$INSECURE_TLS" == "true" ]] && CURL_AUTH_ARGS+=(--insecure)
+  if [[ "$INSECURE_TLS" == "true" ]]; then
+    CURL_AUTH_ARGS+=(--insecure)
+  fi
 }
 
 # The admin PKCS12 uses a legacy PBE that SecureTransport curl cannot load.
