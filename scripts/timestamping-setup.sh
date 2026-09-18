@@ -18,7 +18,7 @@
 #   8. Creates the dedicated mapped user the Basic credentials authenticate as,
 #      and grants it the TSP timestamping right (role with resource 'tspProfiles' / action 'timestamp')
 #   For each of two sets (non-qualified / qualified):
-#       9. Creates an RSA 2048 key pair
+#       9. Creates a key pair (RSA 2048 or ML-DSA-65)
 #      10. Creates an RA profile (resolving EJBCA profile IDs dynamically)
 #      11. Issues a TSA certificate with the requested DN suffix
 #      12. Polls for certificate issuance completion
@@ -71,6 +71,7 @@ TOKEN_NAME="tsa"
 TOKEN_PROFILE_NAME="tsa"
 KEY_NAME_BASE="tsa-rsa"           # -non-qualified / -qualified appended
 RA_PROFILE_NAME_BASE="tsa"        # -non-qualified / -qualified appended
+KEY_ALGORITHM="RSA"               # RSA (implies RSA-2048) | MLDSA (implies pure ML-DSA-65)
 TSP_PROFILE_NAME_BASE="tsp"       # -non-qualified / -qualified appended
 SIGNING_PROFILE_NAME_BASE="tsa"   # -non-qualified / -qualified appended
 TIMESTAMP_FORMATTING_CONNECTOR_NAME="timestamp-formatting-connector"
@@ -237,6 +238,7 @@ Object name bases (suffixes -non-qualified / -qualified are appended automatical
   --token-name NAME           (default: tsa)
   --token-profile-name NAME   (default: tsa)
   --key-name NAME             base for key names          (default: tsa-rsa)
+  --key-algorithm ALG         TSA signing key algorithm: RSA | MLDSA (default: RSA)
   --ra-profile-name NAME      base for RA profile names   (default: tsa)
   --tsp-profile-name NAME     base for TSP profile names  (default: tsp)
   --signing-profile-name NAME base for Signing Profile names (default: tsa)
@@ -427,6 +429,7 @@ parse_args() {
       --token-name)                             TOKEN_NAME="$2";                             shift 2 ;;
       --token-profile-name)                     TOKEN_PROFILE_NAME="$2";                     shift 2 ;;
       --key-name)                               KEY_NAME_BASE="$2";                          shift 2 ;;
+      --key-algorithm)                          KEY_ALGORITHM="$2";                          shift 2 ;;
       --ra-profile-name)                        RA_PROFILE_NAME_BASE="$2";                   shift 2 ;;
       --tsp-profile-name)                       TSP_PROFILE_NAME_BASE="$2";                  shift 2 ;;
       --signing-profile-name)                   SIGNING_PROFILE_NAME_BASE="$2";              shift 2 ;;
@@ -466,6 +469,12 @@ validate() {
     && { echo "ERROR: --allowed-digest-algorithms requires a non-blank value (use 'any' for an unrestricted list)"; errors=$((errors+1)); }
   [[ -z "$(trim "$TSP_CREDENTIAL_PASSWORD")" ]] \
     && { echo "ERROR: --tsp-credential-password requires a non-blank value"; errors=$((errors+1)); }
+  KEY_ALGORITHM=$(echo "$KEY_ALGORITHM" | tr '[:lower:]' '[:upper:]')
+  case "$KEY_ALGORITHM" in
+    RSA) ;;
+    MLDSA|ML-DSA) KEY_ALGORITHM="MLDSA" ;;
+    *) echo "ERROR: --key-algorithm must be RSA or MLDSA (got '$KEY_ALGORITHM')"; errors=$((errors+1)) ;;
+  esac
   [[ $errors -gt 0 ]] && usage
 
   [[ ! -f "$PKCS12_BUNDLE" ]]   && { echo "ERROR: PKCS12 bundle not found: $PKCS12_BUNDLE"; exit 1; }
@@ -902,7 +911,7 @@ setup_token_profile() {
   ok "token profile enabled"
 }
 
-# --- Step 6: Time Quality configuration --------------------------------------
+# --- Step 6: Time Quality configuration ---------------------------------------
 # record_time_quality_settings <configuration_detail_json>
 record_time_quality_settings() {
   TIME_QUALITY_EFFECTIVE_ACCURACY=$(echo "$1"                  | jq -r 'if .accuracy               == null then empty else .accuracy               end')
@@ -962,7 +971,7 @@ setup_time_quality_config() {
   ok "Time Quality configuration  $TIME_QUALITY_UUID"
 }
 
-# --- Step 7a: Vault instance -------------------------------------------------
+# --- Step 7: Vault instance ---------------------------------------------------
 # Created (or reused) under the credential-provider v2 connector, bound to its `secret` interface.
 # The connector requires no instance data attributes, so the request sends an empty attributes array.
 setup_vault_instance() {
@@ -1002,7 +1011,7 @@ vault_secret_interface_uuid() {
   echo "$iface"
 }
 
-# --- Step 7b: Vault profile --------------------------------------------------
+# --- Step 8: Vault profile ----------------------------------------------------
 # Created under the (reused) vault instance; backs the TSP profiles' Basic credentials.
 # The connector requires no profile data attributes, so the request sends an empty attributes array.
 setup_vault_profile() {
@@ -1031,7 +1040,7 @@ setup_vault_profile() {
   ok "vault profile enabled"
 }
 
-# --- Step 8: Mapped user -----------------------------------------------------
+# --- Step 9: Mapped user ------------------------------------------------------
 # The user the TSP Basic credentials authenticate as. Created without a certificate; a basic
 # credential may not map to a system user, so a dedicated regular user is used.
 setup_mapped_user() {
@@ -1060,7 +1069,7 @@ setup_mapped_user() {
   ok "user  $MAPPED_USER_UUID"
 }
 
-# --- Step 8b: Timestamping role ----------------------------------------------
+# --- Step 10: Timestamping role -----------------------------------------------
 # Serving one RFC 3161 timestamp request runs OPA authorization checks as the calling user,
 # scattered across the request path (TsaServiceImpl -> resolver -> CryptographicOperationServiceImpl):
 #   tspProfiles/timestamp   - AuthPermissionEvaluationServiceImpl.tspProfileTimestamping (entry gate)
@@ -1102,65 +1111,51 @@ setup_timestamping_role() {
   fi
 }
 
-# --- Step 18: Object-scoped timestamping permissions -------------------------
-# Applied after both TSA sets exist, so every grant targets concrete object UUIDs rather than the
-# whole resource. The OPA method policy (auth-opa-policies/policies/method_policy.rego)
-# honors object-scoped grants for BOTH request shapes on the timestamp path:
-#   - checks that carry the object UUID (tspProfiles/timestamp via SecuredUUID; tokens/detail via the
-#     SecuredParentUUID token instance) are matched by the "ActionAllowedForSpecificObject" rule;
-#   - name-based checks that carry NO uuid (tspProfiles/detail and signingProfiles/detail load by
-#     String name) are matched by the "ActionAllowedForSomeObjects" rule, which grants when the action
-#     is allowed for some object under the resource.
-# NOTE on keys/sign: the Auth service rejects object-scoped permissions on the 'keys' resource
-# (objectAccess=false in the Auth seed -> "Resource 'Keys' does not support object access permissions"),
-# so keys/sign must be granted resource-wide as an action, not against any object uuid.
-# savePermissions replaces the role's whole permission set, so this is safe to re-apply.
-grant_timestamping_permissions() {
-  local perm_body
-  local nq_tsp_name="${TSP_PROFILE_NAME_BASE}-non-qualified"
-  local q_tsp_name="${TSP_PROFILE_NAME_BASE}-qualified"
-  local nq_sp_name="${SIGNING_PROFILE_NAME_BASE}-non-qualified"
-  local q_sp_name="${SIGNING_PROFILE_NAME_BASE}-qualified"
-
-  perm_body=$(jq -n \
-    --arg tspNqUuid "$TSP_PROFILE_UUID_NQ" --arg tspNqName "$nq_tsp_name" \
-    --arg tspQUuid  "$TSP_PROFILE_UUID_Q"  --arg tspQName  "$q_tsp_name" \
-    --arg spNqUuid  "$SIGNING_PROFILE_UUID_NQ" --arg spNqName "$nq_sp_name" \
-    --arg spQUuid   "$SIGNING_PROFILE_UUID_Q"  --arg spQName  "$q_sp_name" \
-    --arg tokenUuid "$TOKEN_UUID"          --arg tokenName "$TOKEN_NAME" \
-    --arg tpUuid    "$TOKEN_PROFILE_UUID"  --arg tpName    "$TOKEN_PROFILE_NAME" \
-    '{
-      allowAllResources: false,
-      resources: [
-        {name:"tspProfiles", allowAllActions:false, actions:[], objects:[
-          {uuid:$tspNqUuid, name:$tspNqName, allow:["timestamp","detail"], deny:[]},
-          {uuid:$tspQUuid,  name:$tspQName,  allow:["timestamp","detail"], deny:[]}
-        ]},
-        {name:"signingProfiles", allowAllActions:false, actions:[], objects:[
-          {uuid:$spNqUuid, name:$spNqName, allow:["detail"], deny:[]},
-          {uuid:$spQUuid,  name:$spQName,  allow:["detail"], deny:[]}
-        ]},
-        {name:"keys", allowAllActions:false, actions:["sign"], objects:[]},
-        {name:"tokens", allowAllActions:false, actions:[], objects:[
-          {uuid:$tokenUuid, name:$tokenName, allow:["detail"], deny:[]}
-        ]},
-        {name:"tokenProfiles", allowAllActions:false, actions:[], objects:[
-          {uuid:$tpUuid, name:$tpName, allow:["detail"], deny:[]}
-        ]}
-      ]
-    }')
-
-  log "Granting object-scoped timestamping permissions to role '${MAPPED_USER_ROLE_NAME}'..."
-  ilm_curl POST "/v1/roles/${MAPPED_USER_ROLE_UUID}/permissions" -d "$perm_body" >/dev/null
-  ok "object-scoped permissions granted"
+# --- Step 11: Key pair --------------------------------------------------------
+key_algorithm_code() {
+  case "$KEY_ALGORITHM" in
+    MLDSA) echo "ML-DSA" ;;
+    *)     echo "RSA" ;;
+  esac
 }
 
-# --- Step 9: Key pair ---------------------------------------------------------
+# An existing key is matched by name alone, so a rerun that changes --key-algorithm would
+# otherwise reuse the old material and report the requested algorithm over it.
+# Usage: require_key_algorithm <key_details_json> <key_name> <key_uuid>
+require_key_algorithm() {
+  local key_details="$1" key_name="$2" key_uuid="$3" want actual
+  want=$(key_algorithm_code)
+  actual=$(echo "$key_details" | jq -r 'first(.items[]?.keyAlgorithm) // empty')
+  [[ "$actual" == "$want" ]] && return 0
+  die "Existing key '${key_name}' (${key_uuid}) is ${actual:-of an unknown algorithm}, but --key-algorithm asks for ${want}; choose fresh object names (--key-name, --ra-profile-name, --tsp-profile-name, --signing-profile-name) and re-run"
+}
+
+# Usage: signing_operation_attributes <attrs_json>
+signing_operation_attributes() {
+  local attrs="$1" sig_scheme_uuid sig_digest_uuid
+
+  if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
+    echo '[]'
+    return 0
+  fi
+
+  sig_scheme_uuid=$(attr_uuid "$attrs" "data_rsaSigScheme" "string")
+  sig_digest_uuid=$(attr_uuid "$attrs" "data_sigDigest"    "string")
+  jq -n --arg sigSchemeUuid "$sig_scheme_uuid" --arg sigDigestUuid "$sig_digest_uuid" \
+    '[
+      {name: "data_rsaSigScheme", content: [{data: "PKCS1-v1_5", reference: "PKCS#1 v1.5"}],
+       contentType: "string", uuid: $sigSchemeUuid, version: "v2"},
+      {name: "data_sigDigest", content: [{data: "SHA-384", reference: "SHA-384"}],
+       contentType: "string", uuid: $sigDigestUuid, version: "v2"}
+    ]'
+}
+
 # Usage: setup_key_pair <key_name> <out_key_uuid_var> <out_priv_item_uuid_var>
 setup_key_pair() {
   local key_name="$1" out_key_uuid="$2" out_priv_item_uuid="$3"
   local _resp keypair_attr_defs key_alias_uuid key_alg_uuid key_spec_group_uuid
   local key_spec_attrs rsa_key_size_uuid key_details _key_uuid _priv_uuid _existing _list
+  local algorithm_code key_spec_json mldsa_level_uuid mldsa_prehash_uuid
 
   _list=$(ilm_curl GET /v1/keys/pairs)
   _existing=$(find_named_item "$_list" "$key_name")
@@ -1168,6 +1163,7 @@ setup_key_pair() {
     _key_uuid=$(echo "$_existing" | jq -r '.uuid')
     ok "reusing existing key '${key_name}'  $_key_uuid"
     key_details=$(ilm_curl GET "/v1/keys/${_key_uuid}")
+    require_key_algorithm "$key_details" "$key_name" "$_key_uuid"
     _priv_uuid=$(echo "$key_details" | jq -r \
       'first(.items[] | select(.type == "Private") | .uuid) // empty')
     [[ -z "$_priv_uuid" ]] && die "Reused key ${_key_uuid} has no Private key item"
@@ -1184,26 +1180,49 @@ setup_key_pair() {
   key_alg_uuid=$(attr_uuid         "$keypair_attr_defs" "data_keyAlgorithm" "string")
   key_spec_group_uuid=$(group_uuid "$keypair_attr_defs" "group_keySpec")
 
-  log "Fetching RSA key-spec attributes via callback..."
+  algorithm_code=$(key_algorithm_code)
+  log "Fetching ${algorithm_code} key-spec attributes via callback..."
   key_spec_attrs=$(ilm_curl POST "/v1/keys/${TOKEN_PROFILE_UUID}/callback" -d \
-    "$(jq -n --arg uuid "$key_spec_group_uuid" \
-      '{"uuid":$uuid,"name":"group_keySpec","pathVariable":{"algorithm":"RSA"},
+    "$(jq -n --arg uuid "$key_spec_group_uuid" --arg algorithm "$algorithm_code" \
+      '{"uuid":$uuid,"name":"group_keySpec","pathVariable":{"algorithm":$algorithm},
         "requestParameter":{},"body":{},"filter":{}}')")
-  rsa_key_size_uuid=$(attr_uuid "$key_spec_attrs" "data_rsaKeySize" "integer")
 
-  log "Creating RSA 2048 key pair '${key_name}'..."
+  if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
+    mldsa_level_uuid=$(attr_uuid   "$key_spec_attrs" "data_mldsaLevel"   "integer")
+    mldsa_prehash_uuid=$(attr_uuid "$key_spec_attrs" "data_mldsaPrehash" "boolean")
+    key_spec_json=$(jq -n \
+      --arg levelUuid   "$mldsa_level_uuid" \
+      --arg prehashUuid "$mldsa_prehash_uuid" \
+      '[
+        {name: "data_mldsaLevel", content: [{data: 3, reference: "MLDSA_65"}],
+         contentType: "integer", uuid: $levelUuid, version: "v2"},
+        {name: "data_mldsaPrehash", content: [{data: false}],
+         contentType: "boolean", uuid: $prehashUuid, version: "v2"}
+      ]')
+    log "Creating ML-DSA-65 key pair '${key_name}'..."
+  else
+    rsa_key_size_uuid=$(attr_uuid "$key_spec_attrs" "data_rsaKeySize" "integer")
+    key_spec_json=$(jq -n --arg rsaKeySizeUuid "$rsa_key_size_uuid" \
+      '[
+        {name: "data_rsaKeySize", content: [{data: 2048, reference: "RSA_2048"}],
+         contentType: "integer", uuid: $rsaKeySizeUuid, version: "v2"}
+      ]')
+    log "Creating RSA 2048 key pair '${key_name}'..."
+  fi
+
   _resp=$(ilm_curl POST \
     "/v1/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/keyPair" -d \
     "$(jq -n \
       --arg name            "$key_name" \
       --arg keyAliasUuid    "$key_alias_uuid" \
       --arg keyAlgUuid      "$key_alg_uuid" \
-      --arg rsaKeySizeUuid  "$rsa_key_size_uuid" \
+      --arg algorithmCode   "$algorithm_code" \
+      --argjson keySpec     "$key_spec_json" \
       '{
         groupUuids: [],
         name: $name,
         description: "",
-        attributes: [
+        attributes: ([
           {
             name: "data_keyAlias",
             content: [{data: $name}],
@@ -1213,22 +1232,15 @@ setup_key_pair() {
           },
           {
             name: "data_keyAlgorithm",
-            content: [{data: "RSA", reference: "RSA"}],
+            content: [{data: $algorithmCode, reference: $algorithmCode}],
             contentType: "string",
             uuid: $keyAlgUuid,
             version: "v2"
-          },
-          {
-            name: "data_rsaKeySize",
-            content: [{data: 2048, reference: "RSA_2048"}],
-            contentType: "integer",
-            uuid: $rsaKeySizeUuid,
-            version: "v2"
           }
-        ],
+        ] + $keySpec),
         customAttributes: []
       }')")
-  _key_uuid=$(require_uuid "$_resp" "RSA key pair '${key_name}'")
+  _key_uuid=$(require_uuid "$_resp" "${algorithm_code} key pair '${key_name}'")
   ok "key  $_key_uuid"
 
   log "Enabling key..."
@@ -1250,7 +1262,7 @@ setup_key_pair() {
   printf -v "$out_priv_item_uuid" '%s' "$_priv_uuid"
 }
 
-# --- Step 10: RA profile (with dynamic EJBCA profile lookup) ------------------
+# --- Step 12: RA profile (with dynamic EJBCA profile lookup) ------------------
 # Usage: setup_ra_profile <ra_name> <cert_profile_name> <out_ra_profile_uuid_var>
 setup_ra_profile() {
   local ra_name="$1" ejbca_cert_profile="$2" out_ra_uuid="$3"
@@ -1406,21 +1418,21 @@ setup_ra_profile() {
   printf -v "$out_ra_uuid" '%s' "$_ra_uuid"
 }
 
-# --- Step 11: Issue TSA certificate -------------------------------------------
+# --- Step 13: Issue TSA certificate -------------------------------------------
 # Usage: issue_certificate <cn> <key_uuid> <priv_item_uuid> <ra_profile_uuid> <out_cert_uuid_var>
 issue_certificate() {
   local cn="$1" key_uuid="$2" priv_item_uuid="$3" ra_profile_uuid="$4" out_cert_uuid="$5"
-  local _resp csr_attrs cn_uuid sig_attrs sig_scheme_uuid sig_digest_uuid _cert_uuid
+  local _resp csr_attrs cn_uuid sig_attrs signature_attrs algorithm_code _cert_uuid
 
   log "Fetching CSR attribute definitions..."
   csr_attrs=$(ilm_curl GET "/v1/certificates/csr/attributes")
   cn_uuid=$(attr_uuid "$csr_attrs" "commonName" "string")
 
-  log "Fetching signature attribute definitions..."
+  algorithm_code=$(key_algorithm_code)
+  log "Fetching signature attribute definitions (${algorithm_code})..."
   sig_attrs=$(ilm_curl GET \
-    "/v1/operations/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/${key_uuid}/items/${priv_item_uuid}/signature/RSA/attributes")
-  sig_scheme_uuid=$(attr_uuid "$sig_attrs" "data_rsaSigScheme" "string")
-  sig_digest_uuid=$(attr_uuid "$sig_attrs" "data_sigDigest"    "string")
+    "/v1/operations/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/${key_uuid}/items/${priv_item_uuid}/signature/${algorithm_code}/attributes")
+  signature_attrs=$(signing_operation_attributes "$sig_attrs")
 
   log "Issuing TSA certificate  CN=${cn}..."
   _resp=$(ilm_curl POST \
@@ -1430,8 +1442,7 @@ issue_certificate() {
       --arg keyUuid          "$key_uuid" \
       --arg tokenProfileUuid "$TOKEN_PROFILE_UUID" \
       --arg cnUuid           "$cn_uuid" \
-      --arg sigSchemeUuid    "$sig_scheme_uuid" \
-      --arg sigDigestUuid    "$sig_digest_uuid" \
+      --argjson signatureAttributes "$signature_attrs" \
       '{
         format: "pkcs10",
         request: "",
@@ -1445,22 +1456,7 @@ issue_certificate() {
             version: "v3"
           }
         ],
-        signatureAttributes: [
-          {
-            name: "data_rsaSigScheme",
-            content: [{data: "PKCS1-v1_5", reference: "PKCS#1 v1.5"}],
-            contentType: "string",
-            uuid: $sigSchemeUuid,
-            version: "v2"
-          },
-          {
-            name: "data_sigDigest",
-            content: [{data: "SHA-384", reference: "SHA-384"}],
-            contentType: "string",
-            uuid: $sigDigestUuid,
-            version: "v2"
-          }
-        ],
+        signatureAttributes: $signatureAttributes,
         keyUuid: $keyUuid,
         tokenProfileUuid: $tokenProfileUuid,
         customAttributes: []
@@ -1471,7 +1467,7 @@ issue_certificate() {
   printf -v "$out_cert_uuid" '%s' "$_cert_uuid"
 }
 
-# --- Step 12: Poll for certificate issuance result ----------------------------
+# --- Step 14: Poll for certificate issuance result ----------------------------
 # Usage: poll_certificate <cert_uuid> <cn>
 poll_certificate() {
   local cert_uuid="$1" cn="$2"
@@ -1513,7 +1509,7 @@ poll_certificate() {
 }
 
 
-# --- Step 13: Trust the certificate chain -------------------------------------
+# --- Step 15: Trust the certificate chain -------------------------------------
 # Usage: trust_certificate_chain <cert_uuid>
 #
 # Walks issuerCertificateUuid upward from <cert_uuid> and marks the root CA as
@@ -1629,7 +1625,7 @@ wait_for_certificate_validation() {
   done
 }
 
-# --- Step 14: TSP profile -----------------------------------------------------
+# --- Step 16: TSP profile -----------------------------------------------------
 # Usage: setup_tsp_profile <name> <out_tsp_uuid_var>
 setup_tsp_profile() {
   local tsp_name="$1" out_tsp_uuid="$2"
@@ -1664,7 +1660,115 @@ setup_tsp_profile() {
   printf -v "$out_tsp_uuid" '%s' "$_tsp_uuid"
 }
 
-# --- Step 17: TSP Basic credential -------------------------------------------
+# --- Step 17: Signing Profile -------------------------------------------------
+# Usage: setup_signing_profile <sp_name> <cert_uuid> <policy_oid> <time_quality_uuid> <timestamp_formatting_conn_uuid> <out_sp_uuid_var>
+#
+# Pass a non-empty <time_quality_uuid> for the qualified profile to enable
+# qualifiedTimestamp and link to the Time Quality configuration.
+# Pass an empty string for the non-qualified profile.
+setup_signing_profile() {
+  local sp_name="$1" cert_uuid="$2" policy_oid="$3" time_quality_uuid="$4" timestamp_formatting_conn_uuid="$5" out_sp_uuid="$6"
+  local _resp sig_attrs signing_operation_attrs _sp_uuid formatting_attrs
+  local qualified_timestamp allowed_policies allowed_digests
+
+  if [[ -n "$time_quality_uuid" ]]; then
+    qualified_timestamp="true"
+  else
+    qualified_timestamp="false"
+  fi
+
+  log "Fetching signing operation attributes for certificate ${cert_uuid}..."
+  sig_attrs=$(ilm_curl GET \
+    "/v1/signingProfiles/certificates/${cert_uuid}/signatureAttributes")
+  signing_operation_attrs=$(signing_operation_attributes "$sig_attrs")
+
+  log "Fetching timestamp-formatting-connector attributes..."
+  formatting_attrs=$(ilm_curl GET \
+    "/v1/signingProfiles/signatureFormattingConnectors/${timestamp_formatting_conn_uuid}/formattingAttributes" \
+    | jq '[.[] | .version = ("v" + (.version | tostring))]')
+
+  # One global --allowed-policy-ids covers both sets. So the set's own OID always joins a list.
+  allowed_policies=$(csv_to_json_array "$ALLOWED_POLICY_IDS" "$policy_oid" \
+    | jq -c --arg own "$policy_oid" 'if length > 0 and (index($own) | not) then . + [$own] else . end')
+  allowed_digests=$(csv_to_json_array "$ALLOWED_DIGEST_ALGORITHMS")
+
+  log "Creating Signing Profile '${sp_name}'..."
+  _resp=$(ilm_curl POST /v1/signingProfiles -d \
+    "$(jq -n \
+      --arg     name                        "$sp_name" \
+      --arg     policyOid                   "$policy_oid" \
+      --arg     certUuid                    "$cert_uuid" \
+      --argjson signingOperationAttrs       "$signing_operation_attrs" \
+      --argjson qualifiedTimestamp          "$qualified_timestamp" \
+      --arg     timeQualityUuid             "$time_quality_uuid" \
+      --arg     timestampFormattingConnUuid "$timestamp_formatting_conn_uuid" \
+      --argjson formattingAttrs             "$formatting_attrs" \
+      --argjson allowedPolicyIds            "$allowed_policies" \
+      --argjson allowedDigestAlgorithms     "$allowed_digests" \
+      '{
+        name: $name,
+        workflow: (
+          {
+            type: "timestamping",
+            signatureFormattingConnectorUuid: $timestampFormattingConnUuid,
+            signatureFormattingConnectorAttributes: $formattingAttrs,
+            qualifiedTimestamp: $qualifiedTimestamp,
+            defaultPolicyId: $policyOid,
+            allowedPolicyIds: $allowedPolicyIds,
+            allowedDigestAlgorithms: $allowedDigestAlgorithms
+          }
+          | if $timeQualityUuid != "" then
+              . + {timeQualityConfigurationUuid: $timeQualityUuid}
+            else . end
+        ),
+        signingScheme: {
+          signingScheme: "managed",
+          managedSigningType: "static_key",
+          certificateUuid: $certUuid,
+          signingOperationAttributes: $signingOperationAttrs
+        },
+        customAttributes: []
+      }')")
+  _sp_uuid=$(require_uuid "$_resp" "Signing Profile '${sp_name}'")
+  ok "Signing Profile  $_sp_uuid"
+
+  log "Enabling Signing Profile..."
+  ilm_curl PATCH "/v1/signingProfiles/${_sp_uuid}/enable" >/dev/null
+  ok "Signing Profile enabled"
+
+  printf -v "$out_sp_uuid" '%s' "$_sp_uuid"
+}
+
+# --- Step 18: Link Signing Profile ↔ TSP Profile (bidirectional) --------------
+# Usage: link_tsp_signing_profile <tsp_uuid> <tsp_name> <sp_uuid>
+#
+# Direction 1: TSP profile → Signing Profile (sets defaultSigningProfileUuid)
+# Direction 2: Signing Profile → TSP profile (activates TSP protocol)
+link_tsp_signing_profile() {
+  local tsp_uuid="$1" tsp_name="$2" sp_uuid="$3"
+  local _resp
+
+  # PUT replaces the resource: re-send vaultProfileUuid and the auth methods or they would be stripped.
+  log "Linking TSP profile '${tsp_name}' to Signing Profile (setting default)..."
+  ilm_curl PUT "/v1/tspProfiles/${tsp_uuid}" -d \
+    "$(jq -n \
+      --arg name   "$tsp_name" \
+      --arg spUuid "$sp_uuid" \
+      --arg vaultProfileUuid "$VAULT_PROFILE_UUID" \
+      '{name: $name,
+        defaultSigningProfileUuid: $spUuid,
+        vaultProfileUuid: $vaultProfileUuid,
+        allowedAuthenticationMethods: ["clientCertificate", "basicPassword"],
+        customAttributes: []}')" \
+    >/dev/null
+  ok "TSP profile default Signing Profile set"
+
+  log "Activating TSP protocol on Signing Profile for TSP profile '${tsp_name}'..."
+  _resp=$(ilm_curl PATCH "/v1/signingProfiles/${sp_uuid}/protocols/tsp/activate/${tsp_uuid}")
+  ok "TSP protocol activated  signingUrl=$(echo "$_resp" | jq -r '.signingUrl // "(unknown)"')"
+}
+
+# --- Step 19: TSP Basic credential --------------------------------------------
 # Usage: setup_tsp_basic_credential <tsp_uuid> <out_cred_uuid_var>
 # Creates a username/password credential on the TSP profile, mapped to MAPPED_USER_UUID.
 # Idempotent: usernames are unique per profile, so an existing one is reused.
@@ -1708,129 +1812,100 @@ setup_tsp_basic_credential() {
   printf -v "$out_cred_uuid" '%s' "$_cred_uuid"
 }
 
-# --- Step 15: Signing Profile -------------------------------------------------
-# Usage: setup_signing_profile <sp_name> <cert_uuid> <policy_oid> <time_quality_uuid> <timestamp_formatting_conn_uuid> <out_sp_uuid_var>
-#
-# Pass a non-empty <time_quality_uuid> for the qualified profile to enable
-# qualifiedTimestamp and link to the Time Quality configuration.
-# Pass an empty string for the non-qualified profile.
-setup_signing_profile() {
-  local sp_name="$1" cert_uuid="$2" policy_oid="$3" time_quality_uuid="$4" timestamp_formatting_conn_uuid="$5" out_sp_uuid="$6"
-  local _resp sig_attrs sig_scheme_uuid sig_digest_uuid _sp_uuid formatting_attrs
-  local qualified_timestamp allowed_policies allowed_digests
-
-  if [[ -n "$time_quality_uuid" ]]; then
-    qualified_timestamp="true"
-  else
-    qualified_timestamp="false"
-  fi
-
-  log "Fetching signing operation attributes for certificate ${cert_uuid}..."
-  sig_attrs=$(ilm_curl GET \
-    "/v1/signingProfiles/certificates/${cert_uuid}/signatureAttributes")
-  sig_scheme_uuid=$(attr_uuid "$sig_attrs" "data_rsaSigScheme" "string")
-  sig_digest_uuid=$(attr_uuid "$sig_attrs" "data_sigDigest"    "string")
-
-  log "Fetching timestamp-formatting-connector attributes..."
-  formatting_attrs=$(ilm_curl GET \
-    "/v1/signingProfiles/signatureFormattingConnectors/${timestamp_formatting_conn_uuid}/formattingAttributes" \
-    | jq '[.[] | .version = ("v" + (.version | tostring))]')
-
-  # One global --allowed-policy-ids covers both sets. So the set's own OID always joins a list.
-  allowed_policies=$(csv_to_json_array "$ALLOWED_POLICY_IDS" "$policy_oid" \
-    | jq -c --arg own "$policy_oid" 'if length > 0 and (index($own) | not) then . + [$own] else . end')
-  allowed_digests=$(csv_to_json_array "$ALLOWED_DIGEST_ALGORITHMS")
-
-  log "Creating Signing Profile '${sp_name}'..."
-  _resp=$(ilm_curl POST /v1/signingProfiles -d \
-    "$(jq -n \
-      --arg  name                        "$sp_name" \
-      --arg  policyOid                   "$policy_oid" \
-      --arg  certUuid                    "$cert_uuid" \
-      --arg  sigSchemeUuid               "$sig_scheme_uuid" \
-      --arg  sigDigestUuid               "$sig_digest_uuid" \
-      --argjson qualifiedTimestamp       "$qualified_timestamp" \
-      --arg  timeQualityUuid             "$time_quality_uuid" \
-      --arg  timestampFormattingConnUuid "$timestamp_formatting_conn_uuid" \
-      --argjson formattingAttrs          "$formatting_attrs" \
-      --argjson allowedPolicyIds         "$allowed_policies" \
-      --argjson allowedDigestAlgorithms  "$allowed_digests" \
-      '{
-        name: $name,
-        workflow: (
-          {
-            type: "timestamping",
-            signatureFormattingConnectorUuid: $timestampFormattingConnUuid,
-            signatureFormattingConnectorAttributes: $formattingAttrs,
-            qualifiedTimestamp: $qualifiedTimestamp,
-            defaultPolicyId: $policyOid,
-            allowedPolicyIds: $allowedPolicyIds,
-            allowedDigestAlgorithms: $allowedDigestAlgorithms
-          }
-          | if $timeQualityUuid != "" then
-              . + {timeQualityConfigurationUuid: $timeQualityUuid}
-            else . end
-        ),
-        signingScheme: {
-          signingScheme: "managed",
-          managedSigningType: "static_key",
-          certificateUuid: $certUuid,
-          signingOperationAttributes: [
-            {
-              name: "data_rsaSigScheme",
-              content: [{data: "PKCS1-v1_5", reference: "PKCS#1 v1.5"}],
-              contentType: "string",
-              uuid: $sigSchemeUuid,
-              version: "v2"
-            },
-            {
-              name: "data_sigDigest",
-              content: [{data: "SHA-384", reference: "SHA-384"}],
-              contentType: "string",
-              uuid: $sigDigestUuid,
-              version: "v2"
-            }
-          ]
-        },
-        customAttributes: []
-      }')")
-  _sp_uuid=$(require_uuid "$_resp" "Signing Profile '${sp_name}'")
-  ok "Signing Profile  $_sp_uuid"
-
-  log "Enabling Signing Profile..."
-  ilm_curl PATCH "/v1/signingProfiles/${_sp_uuid}/enable" >/dev/null
-  ok "Signing Profile enabled"
-
-  printf -v "$out_sp_uuid" '%s' "$_sp_uuid"
+# --- Step 20: Object-scoped timestamping permissions --------------------------
+# Applied after both TSA sets exist, so every grant targets concrete object UUIDs rather than the
+# whole resource. The OPA method policy (auth-opa-policies/policies/method_policy.rego)
+# honors object-scoped grants for BOTH request shapes on the timestamp path:
+#   - checks that carry the object UUID (tspProfiles/timestamp via SecuredUUID; tokens/detail via the
+#     SecuredParentUUID token instance) are matched by the "ActionAllowedForSpecificObject" rule;
+#   - name-based checks that carry NO uuid (tspProfiles/detail and signingProfiles/detail load by
+#     String name) are matched by the "ActionAllowedForSomeObjects" rule, which grants when the action
+#     is allowed for some object under the resource.
+# NOTE on keys/sign: the Auth service rejects object-scoped permissions on the 'keys' resource
+# (objectAccess=false in the Auth seed -> "Resource 'Keys' does not support object access permissions"),
+# so keys/sign must be granted resource-wide as an action, not against any object uuid.
+timestamping_permissions() {
+  jq -n \
+    --arg tspNqUuid "$TSP_PROFILE_UUID_NQ" --arg tspNqName "${TSP_PROFILE_NAME_BASE}-non-qualified" \
+    --arg tspQUuid  "$TSP_PROFILE_UUID_Q"  --arg tspQName  "${TSP_PROFILE_NAME_BASE}-qualified" \
+    --arg spNqUuid  "$SIGNING_PROFILE_UUID_NQ" --arg spNqName "${SIGNING_PROFILE_NAME_BASE}-non-qualified" \
+    --arg spQUuid   "$SIGNING_PROFILE_UUID_Q"  --arg spQName  "${SIGNING_PROFILE_NAME_BASE}-qualified" \
+    --arg tokenUuid "$TOKEN_UUID"          --arg tokenName "$TOKEN_NAME" \
+    --arg tpUuid    "$TOKEN_PROFILE_UUID"  --arg tpName    "$TOKEN_PROFILE_NAME" \
+    '{
+      allowAllResources: false,
+      resources: [
+        {name:"tspProfiles", allowAllActions:false, actions:[], objects:[
+          {uuid:$tspNqUuid, name:$tspNqName, allow:["timestamp","detail"], deny:[]},
+          {uuid:$tspQUuid,  name:$tspQName,  allow:["timestamp","detail"], deny:[]}
+        ]},
+        {name:"signingProfiles", allowAllActions:false, actions:[], objects:[
+          {uuid:$spNqUuid, name:$spNqName, allow:["detail"], deny:[]},
+          {uuid:$spQUuid,  name:$spQName,  allow:["detail"], deny:[]}
+        ]},
+        {name:"keys", allowAllActions:false, actions:["sign"], objects:[]},
+        {name:"tokens", allowAllActions:false, actions:[], objects:[
+          {uuid:$tokenUuid, name:$tokenName, allow:["detail"], deny:[]}
+        ]},
+        {name:"tokenProfiles", allowAllActions:false, actions:[], objects:[
+          {uuid:$tpUuid, name:$tpName, allow:["detail"], deny:[]}
+        ]}
+      ]
+    }'
 }
 
-# --- Step 16: Link Signing Profile ↔ TSP Profile (bidirectional) ---------------
-# Usage: link_tsp_signing_profile <tsp_uuid> <tsp_name> <sp_uuid>
-#
-# Direction 1: TSP profile → Signing Profile (sets defaultSigningProfileUuid)
-# Direction 2: Signing Profile → TSP profile (activates TSP protocol)
-link_tsp_signing_profile() {
-  local tsp_uuid="$1" tsp_name="$2" sp_uuid="$3"
-  local _resp
+# This script is the sole manager of the role, so it grants and never denies.
+# Usage: require_no_deny_entries <permissions_json>
+require_no_deny_entries() {
+  local denied
+  denied=$(echo "$1" | jq -r '
+    [.resources[]? as $r | $r.objects[]? | select((.deny // []) | length > 0)
+     | "\($r.name)/\(.name // .uuid)"] | join(", ")')
+  [[ -z "$denied" ]] && return 0
+  die "Role '${MAPPED_USER_ROLE_NAME}' carries deny entries (${denied}); this script manages that role exclusively and a non-empty deny list makes every request unauthorized. Clear them (or delete the role) and re-run"
+}
 
-  # PUT replaces the resource: re-send vaultProfileUuid and the auth methods or they would be stripped.
-  log "Linking TSP profile '${tsp_name}' to Signing Profile (setting default)..."
-  ilm_curl PUT "/v1/tspProfiles/${tsp_uuid}" -d \
-    "$(jq -n \
-      --arg name   "$tsp_name" \
-      --arg spUuid "$sp_uuid" \
-      --arg vaultProfileUuid "$VAULT_PROFILE_UUID" \
-      '{name: $name,
-        defaultSigningProfileUuid: $spUuid,
-        vaultProfileUuid: $vaultProfileUuid,
-        allowedAuthenticationMethods: ["clientCertificate", "basicPassword"],
-        customAttributes: []}')" \
-    >/dev/null
-  ok "TSP profile default Signing Profile set"
+# savePermissions replaces the role's whole permission set, so the grants have to be merged.
+# Usage: merge_permissions <existing_json> <desired_json>
+merge_permissions() {
+  jq -n --argjson existing "$1" --argjson desired "$2" '
+    def merged_list(f): (map(f // []) | add // []) | unique;
+    {
+      allowAllResources: (($existing.allowAllResources // false) or ($desired.allowAllResources // false)),
+      resources: (
+        (($existing.resources // []) + ($desired.resources // []))
+        | group_by(.name)
+        | map({
+            name: .[0].name,
+            allowAllActions: (map(.allowAllActions // false) | any),
+            actions: merged_list(.actions),
+            objects: (
+              (map(.objects // []) | add // [])
+              | group_by(.uuid)
+              | map({
+                  uuid:  .[0].uuid,
+                  name:  .[0].name,
+                  allow: merged_list(.allow),
+                  deny:  []
+                })
+            )
+          })
+      )
+    }'
+}
 
-  log "Activating TSP protocol on Signing Profile for TSP profile '${tsp_name}'..."
-  _resp=$(ilm_curl PATCH "/v1/signingProfiles/${sp_uuid}/protocols/tsp/activate/${tsp_uuid}")
-  ok "TSP protocol activated  signingUrl=$(echo "$_resp" | jq -r '.signingUrl // "(unknown)"')"
+grant_timestamping_permissions() {
+  local desired existing perm_body
+
+  desired=$(timestamping_permissions)
+  existing=$(ilm_curl GET "/v1/roles/${MAPPED_USER_ROLE_UUID}/permissions") \
+    || die "Could not read the current permissions of role '${MAPPED_USER_ROLE_NAME}'"
+  require_no_deny_entries "$existing"
+  perm_body=$(merge_permissions "$existing" "$desired")
+
+  log "Granting object-scoped timestamping permissions to role '${MAPPED_USER_ROLE_NAME}'..."
+  ilm_curl POST "/v1/roles/${MAPPED_USER_ROLE_UUID}/permissions" -d "$perm_body" >/dev/null
+  ok "object-scoped permissions granted"
 }
 
 # --- Per-set orchestration ----------------------------------------------------
@@ -1864,6 +1939,7 @@ setup_tsa_set() {
     _list=$(ilm_curl GET /v1/keys/pairs)
     key_uuid=$(uuid_of_named "$_list" "$key_name")
     [[ -z "$key_uuid" ]] && die "Reused Signing Profile '${sp_name}' ($sp_uuid) has no matching key pair '${key_name}'; resolve the inconsistency (recreate or rename the key pair) and re-run"
+    require_key_algorithm "$(ilm_curl GET "/v1/keys/${key_uuid}")" "$key_name" "$key_uuid"
     _list=$(ilm_curl GET /v1/raProfiles)
     ra_uuid=$(uuid_of_named "$_list" "$ra_name")
     [[ -z "$ra_uuid" ]] && die "Reused Signing Profile '${sp_name}' ($sp_uuid) has no matching RA profile '${ra_name}'; resolve the inconsistency (recreate or rename the RA profile) and re-run"
@@ -2013,6 +2089,7 @@ write_json_summary() {
     --arg qTspName "${TSP_PROFILE_NAME_BASE}-qualified"     --arg qTspUuid "$TSP_PROFILE_UUID_Q" \
     --arg qCredUuid "$TSP_CREDENTIAL_UUID_Q" \
     --arg qSpName "${SIGNING_PROFILE_NAME_BASE}-qualified"  --arg qSpUuid "$SIGNING_PROFILE_UUID_Q" \
+    --arg keyAlgorithm "$(key_algorithm_code)" \
     '{
       ilmHost: $ilmHost,
       connectorHost: $connectorHost,
@@ -2044,6 +2121,7 @@ write_json_summary() {
       sets: {
         nonQualified: {
           qualified: false,
+          keyAlgorithm:    $keyAlgorithm,
           policyOid:       (if $nqPolicyOid == "" then null else $nqPolicyOid end),
           timeQualityUuid: (if $nqTqUuid == "" then null else $nqTqUuid end),
           key:             { name: $nqKeyName,  uuid: $nqKeyUuid },
@@ -2055,6 +2133,7 @@ write_json_summary() {
         },
         qualified: {
           qualified: true,
+          keyAlgorithm:    $keyAlgorithm,
           policyOid:       (if $qPolicyOid == "" then null else $qPolicyOid end),
           timeQualityUuid: (if $qTqUuid == "" then null else $qTqUuid end),
           key:             { name: $qKeyName,  uuid: $qKeyUuid },
