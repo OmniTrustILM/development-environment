@@ -13,22 +13,22 @@
 #   4. Creates a soft token
 #   5. Creates a token profile
 #   6. Creates a Time Quality configuration (used by the qualified signing profile)
-#   7. Discovers the vault instance (by name) and creates a vault profile under it
-#      (the vault profile backs the TSP profiles' Basic credentials)
-#   8. Creates the dedicated mapped user the Basic credentials authenticate as,
-#      and grants it the TSP timestamping right (role with resource 'tspProfiles' / action 'timestamp')
+#   7. Discovers the vault instance (by name)
+#   8. Creates a vault profile under it (the vault profile backs the TSP profiles' Basic credentials)
+#   9. Creates the dedicated mapped user, authenticating with Basic credentials
+#  10. Creates the timestamping role and attaches it to that user (its permissions are granted in step 20)
 #   For each of two sets (non-qualified / qualified):
-#       9. Creates a key pair (RSA 2048 or ML-DSA-65)
-#      10. Creates an RA profile (resolving EJBCA profile IDs dynamically)
-#      11. Issues a TSA certificate with the requested DN suffix
-#      12. Polls for certificate issuance completion
-#      13. Trusts the certificate chain (marks root CA as trusted, triggers validation)
-#      14. Creates and enables a TSP profile (clientCertificate + basicPassword, linked to the vault profile)
-#      15. Creates and enables a Signing Profile
+#      11. Creates a key pair (RSA 2048 or ML-DSA-65)
+#      12. Creates an RA profile (resolving EJBCA profile IDs dynamically)
+#      13. Issues a TSA certificate with the requested DN suffix
+#      14. Polls for certificate issuance completion
+#      15. Trusts the certificate chain (marks root CA as trusted, triggers validation)
+#      16. Creates and enables a TSP profile (clientCertificate + basicPassword, linked to the vault profile)
+#      17. Creates and enables a Signing Profile
 #          (qualified profile links to the Time Quality configuration)
-#      16. Links the Signing Profile to the TSP Profile bidirectionally
-#      17. Creates a Basic (username/password) credential on the TSP profile, mapped to the user
-#  18. Grants object-scoped timestamping permissions to the role (applied after both sets exist)
+#      18. Links the Signing Profile to the TSP Profile bidirectionally
+#      19. Creates a Basic (username/password) credential on the TSP profile, mapped to the user
+#  20. Grants object-scoped timestamping permissions to the role (applied after both sets exist)
 #
 # Requires: curl, jq, base64
 
@@ -1121,13 +1121,25 @@ key_algorithm_code() {
 
 # An existing key is matched by name alone, so a rerun that changes --key-algorithm would
 # otherwise reuse the old material and report the requested algorithm over it.
-# Usage: require_key_algorithm <key_details_json> <key_name> <key_uuid>
-require_key_algorithm() {
-  local key_details="$1" key_name="$2" key_uuid="$3" want actual
+# Usage: require_key_spec <key_details_json> <key_name> <key_uuid>
+require_key_spec() {
+  local key_details="$1" key_name="$2" key_uuid="$3" want actual spec want_spec
+  local hint="choose fresh object names (--key-name, --ra-profile-name, --tsp-profile-name, --signing-profile-name) and re-run"
   want=$(key_algorithm_code)
   actual=$(echo "$key_details" | jq -r 'first(.items[]?.keyAlgorithm) // empty')
-  [[ "$actual" == "$want" ]] && return 0
-  die "Existing key '${key_name}' (${key_uuid}) is ${actual:-of an unknown algorithm}, but --key-algorithm asks for ${want}; choose fresh object names (--key-name, --ra-profile-name, --tsp-profile-name, --signing-profile-name) and re-run"
+  [[ "$actual" != "$want" ]] \
+    && die "Existing key '${key_name}' (${key_uuid}) is ${actual:-of an unknown algorithm}, but --key-algorithm asks for ${want}; ${hint}"
+
+  if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
+    spec=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Private") | .keyData | fromjson?
+      | "ML-DSA level \(.level), prehash \(.prehash)") // empty')
+    want_spec="ML-DSA level 3, prehash false"
+  else
+    spec=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Public") | "RSA \(.length) bits") // empty')
+    want_spec="RSA 2048 bits"
+  fi
+  [[ "$spec" == "$want_spec" ]] && return 0
+  die "Existing key '${key_name}' (${key_uuid}) is ${spec:-of an unknown key spec}, but --key-algorithm ${KEY_ALGORITHM} provisions ${want_spec}; ${hint}"
 }
 
 # Usage: signing_operation_attributes <attrs_json>
@@ -1163,7 +1175,7 @@ setup_key_pair() {
     _key_uuid=$(echo "$_existing" | jq -r '.uuid')
     ok "reusing existing key '${key_name}'  $_key_uuid"
     key_details=$(ilm_curl GET "/v1/keys/${_key_uuid}")
-    require_key_algorithm "$key_details" "$key_name" "$_key_uuid"
+    require_key_spec "$key_details" "$key_name" "$_key_uuid"
     _priv_uuid=$(echo "$key_details" | jq -r \
       'first(.items[] | select(.type == "Private") | .uuid) // empty')
     [[ -z "$_priv_uuid" ]] && die "Reused key ${_key_uuid} has no Private key item"
@@ -1854,30 +1866,35 @@ timestamping_permissions() {
     }'
 }
 
-# This script is the sole manager of the role, so it grants and never denies.
-# Usage: require_no_deny_entries <permissions_json>
-require_no_deny_entries() {
-  local denied
-  denied=$(echo "$1" | jq -r '
-    [.resources[]? as $r | $r.objects[]? | select((.deny // []) | length > 0)
-     | "\($r.name)/\(.name // .uuid)"] | join(", ")')
-  [[ -z "$denied" ]] && return 0
-  die "Role '${MAPPED_USER_ROLE_NAME}' carries deny entries (${denied}); this script manages that role exclusively and a non-empty deny list makes every request unauthorized. Clear them (or delete the role) and re-run"
+# This script is the sole manager of the role, so it grants object-scoped rights and never denies
+# or broadens. Anything else in the role was put there from outside and would be merged forward.
+# Usage: require_scoped_grants_only <permissions_json>
+require_scoped_grants_only() {
+  local offenders
+  offenders=$(echo "$1" | jq -r '
+    [ (select(.allowAllResources == true) | "allowAllResources"),
+      (.resources[]? | select(.allowAllActions == true) | "\(.name)/allowAllActions"),
+      (.resources[]? as $r | $r.objects[]? | select((.deny // []) | length > 0)
+       | "\($r.name)/\(.name // .uuid) deny")
+    ] | join(", ")')
+  [[ -z "$offenders" ]] && return 0
+  die "Role '${MAPPED_USER_ROLE_NAME}' carries grants this script does not manage (${offenders}); it manages that role exclusively. Clear them (or delete the role) and re-run"
 }
 
 # savePermissions replaces the role's whole permission set, so the grants have to be merged.
+# Only object-scoped allows are carried forward.
 # Usage: merge_permissions <existing_json> <desired_json>
 merge_permissions() {
   jq -n --argjson existing "$1" --argjson desired "$2" '
     def merged_list(f): (map(f // []) | add // []) | unique;
     {
-      allowAllResources: (($existing.allowAllResources // false) or ($desired.allowAllResources // false)),
+      allowAllResources: false,
       resources: (
         (($existing.resources // []) + ($desired.resources // []))
         | group_by(.name)
         | map({
             name: .[0].name,
-            allowAllActions: (map(.allowAllActions // false) | any),
+            allowAllActions: false,
             actions: merged_list(.actions),
             objects: (
               (map(.objects // []) | add // [])
@@ -1900,7 +1917,7 @@ grant_timestamping_permissions() {
   desired=$(timestamping_permissions)
   existing=$(ilm_curl GET "/v1/roles/${MAPPED_USER_ROLE_UUID}/permissions") \
     || die "Could not read the current permissions of role '${MAPPED_USER_ROLE_NAME}'"
-  require_no_deny_entries "$existing"
+  require_scoped_grants_only "$existing"
   perm_body=$(merge_permissions "$existing" "$desired")
 
   log "Granting object-scoped timestamping permissions to role '${MAPPED_USER_ROLE_NAME}'..."
@@ -1931,15 +1948,15 @@ setup_tsa_set() {
   existing_sp=$(find_named_item "$_list" "$sp_name")
   if [[ -n "$existing_sp" ]]; then
     sp_uuid=$(echo "$existing_sp" | jq -r '.uuid')
+    _list=$(ilm_curl GET /v1/keys/pairs)
+    key_uuid=$(uuid_of_named "$_list" "$key_name")
+    [[ -z "$key_uuid" ]] && die "Reused Signing Profile '${sp_name}' ($sp_uuid) has no matching key pair '${key_name}'; resolve the inconsistency (recreate or rename the key pair) and re-run"
+    require_key_spec "$(ilm_curl GET "/v1/keys/${key_uuid}")" "$key_name" "$key_uuid"
     if [[ "$(echo "$existing_sp" | jq -r '.enabled // false')" != "true" ]]; then
       ilm_curl PATCH "/v1/signingProfiles/${sp_uuid}/enable" >/dev/null
       ok "re-enabled disabled Signing Profile '${sp_name}'"
     fi
     ok "TSA ${suffix} set already configured (Signing Profile '${sp_name}'  $sp_uuid); reusing, no new certificate issued and its stored request-validation allow-lists are kept"
-    _list=$(ilm_curl GET /v1/keys/pairs)
-    key_uuid=$(uuid_of_named "$_list" "$key_name")
-    [[ -z "$key_uuid" ]] && die "Reused Signing Profile '${sp_name}' ($sp_uuid) has no matching key pair '${key_name}'; resolve the inconsistency (recreate or rename the key pair) and re-run"
-    require_key_algorithm "$(ilm_curl GET "/v1/keys/${key_uuid}")" "$key_name" "$key_uuid"
     _list=$(ilm_curl GET /v1/raProfiles)
     ra_uuid=$(uuid_of_named "$_list" "$ra_name")
     [[ -z "$ra_uuid" ]] && die "Reused Signing Profile '${sp_name}' ($sp_uuid) has no matching RA profile '${ra_name}'; resolve the inconsistency (recreate or rename the RA profile) and re-run"
