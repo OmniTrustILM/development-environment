@@ -377,14 +377,13 @@ services:
       retries: 5
     profiles:
       - pkcs11-cryptography-provider-standalone
-      - all
 
   # pkcs11-cryptography-provider connector requires one or more proxy sidecars.
   # In Kubernetes these share the connector's pod; compose gives each its own service.
-  # See the development environment guide how to pull the image.
+  # The image is published from the connector repository.
   pkcs11-sidecar-softhsm:
     container_name: pkcs11-sidecar-softhsm
-    image: pkcs11-sidecar-softhsm:develop-latest
+    image: hub.omnitrustregistry.com/ilm-private/pkcs11-sidecar-softhsm:develop-latest
     restart: unless-stopped
     ports:
       - 8291:8051
@@ -401,7 +400,6 @@ services:
       retries: 5
     profiles:
       - pkcs11-cryptography-provider-standalone
-      - all
 
   ip-discovery-provider:
     container_name: ip-discovery-provider
