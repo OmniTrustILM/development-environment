@@ -369,3 +369,10 @@ with SoftHSM proxy sidecar. `pkcs11/profiles.json` lists one config profile per 
 and the connector offers those names as the `profile` token attribute.
 
 SoftHSM needs no additional configuration — the sidecar image ships an already initialized token.
+The sidecar image is not built here. It is published from the connector repository to the
+private registry, so pull it once and drop the registry prefix:
+
+```shell
+docker pull <registry>/pkcs11-sidecar-softhsm:develop-latest
+docker tag <registry>/pkcs11-sidecar-softhsm:develop-latest pkcs11-sidecar-softhsm:develop-latest
+```

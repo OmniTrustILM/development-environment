@@ -381,12 +381,10 @@ services:
 
   # pkcs11-cryptography-provider connector requires one or more proxy sidecars.
   # In Kubernetes these share the connector's pod; compose gives each its own service.
-  #
-  # SoftHSM sidecar cannot be built from sources here because the docker image is finalized
-  # in various repositories. Docker compose cannot express that.
+  # See the development environment guide how to pull the image.
   pkcs11-sidecar-softhsm:
     container_name: pkcs11-sidecar-softhsm
-    image: pkcs11-sidecar-softhsm:local
+    image: pkcs11-sidecar-softhsm:develop-latest
     restart: unless-stopped
     ports:
       - 8291:8051
