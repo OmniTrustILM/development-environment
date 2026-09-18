@@ -83,7 +83,11 @@ Auth ..> Pem
 @enduml
 ```
 
-The Core API is published on host port `8280` (mapped to container port `8080`). The Local API, used to register the first administrator, answers only requests from the `core` container's own localhost, so it is not reachable through the published port — call it with `docker exec` (see [Authentication](#authentication)). State lives in bind mounts under the repository root: the PostgreSQL data under `./data/postgres`, the broker state and logs under `./data/rabbitmq`, and the trusted CA bundle at `./secrets/trusted_certificates.pem`.
+The Core API is published on host port `8280` (mapped to container port `8080`). The Local API, used to register the first
+administrator, answers only requests from the `core` container's own localhost, so it is not reachable through the published
+port — call it with `docker exec` (see [Authentication](#authentication)). State lives in bind mounts under the repository
+root: the PostgreSQL data under `./data/postgres`, the broker state and logs under `./data/rabbitmq`, and the trusted CA bundle
+at `./secrets/trusted_certificates.pem`. The SoftHSM sidecar's token lives in a docker volume.
 
 ## Prerequisites
 
@@ -120,6 +124,8 @@ Create a `.env` file in the root of the repository and update the values. The `.
 | `SMTP_PASSWORD` | Password for the SMTP server. Used with the `email-notification-provider` service. |
 | `GITHUB_USERNAME` | Username for the GitHub account to get the packages, if necessary. |
 | `GITHUB_PASSWORD` | Password for the GitHub account to get the packages, if necessary. |
+| `SOFTHSM_USER_PIN` | User PIN of the SoftHSM sidecar's token. |
+| `SOFTHSM_SO_PIN` | Security Officer PIN of the SoftHSM sidecar's token. |
 
 ### Trusted CA certificates
 
@@ -168,9 +174,10 @@ The Compose files define profiles that can be used to start the required service
 | `core` | `opa` `rabbitmq` `auth` `opa-bundle-server` `scheduler` `core` | Starts the core services of the platform. |
 | `database` | `postgres` | Starts the PostgreSQL database. |
 | `core-dev` | `opa` `rabbitmq` `auth` `opa-bundle-server` `scheduler` | Starts services that are needed for the development of the Core service. |
-| `all` | Every service — each service definition in both Compose files carries the `all` profile. | Starts all services. |
+| `all` | Every service except `pkcs11-cryptography-provider` and `pkcs11-sidecar-softhsm`. | Starts all services that build locally or pull from a public registry. |
 
-Each service can also be started separately using the profile named `[service name]-standalone`. The one exception is the `utils` service, whose dedicated profile is named `utils`.
+Most of the services can also be started separately using the profile named `[service name]-standalone`.
+
 
 ### Developing the Core service
 
@@ -361,3 +368,15 @@ Run `./scripts/timestamping-setup.sh --help` for the full option list (connector
 ## Connectors and technologies
 
 To have a complete setup, you need a technology available for the connectors. For example, if you would like to work with the Authority Provider functions, you should have an appropriate connector running that is able to communicate with the target technology.
+
+## PKCS#11 connector and its sidecars
+
+The `pkcs11-cryptography-provider-standalone` profile starts the PKCS#11 connector together
+with SoftHSM proxy sidecar. `pkcs11/profiles.json` lists one config profile per sidecar,
+and the connector offers those names as the `profile` token attribute.
+
+SoftHSM needs no additional configuration — the sidecar initializes its token on the first start.
+
+The sidecar image is not built here. It is published from the connector repository to
+`hub.omnitrustregistry.com/ilm-private`, so `docker login hub.omnitrustregistry.com` and read
+access to the `ilm-private` project are prerequisites of this profile.
