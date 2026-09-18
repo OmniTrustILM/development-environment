@@ -351,6 +351,60 @@ services:
       - software-cryptography-provider-standalone
       - all
 
+  pkcs11-cryptography-provider:
+    container_name: pkcs11-cryptography-provider
+    image: ilm-pkcs11-cryptography-provider
+    build: ${ILM_SOURCES_BASE_DIR}/pkcs11-cryptography-provider
+    restart: unless-stopped
+    ports:
+      - "8290:8080"
+    environment:
+      - APP_ADDR=:8080
+      - APP_PROFILES_FILE=/etc/pkcs11-cryptography-provider/profiles.json
+    volumes:
+      - ./pkcs11/profiles.json:/etc/pkcs11-cryptography-provider/profiles.json:ro
+    # Local PKCS#11 simulators can run on separate VMs, so they are reached
+    # through the port they publish on the host rather than on this network.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      pkcs11-sidecar-softhsm:
+        condition: service_healthy
+    healthcheck:
+      test: wget -O - http://localhost:8080/v2/health/liveness | grep -q '"status":"UP"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - pkcs11-cryptography-provider-standalone
+      - all
+
+  # pkcs11-cryptography-provider connector requires one or more proxy sidecars.
+  # In Kubernetes these share the connector's pod; compose gives each its own service.
+  #
+  # SoftHSM sidecar cannot be built from sources here because the docker image is finalized
+  # in various repositories. Docker compose cannot express that.
+  pkcs11-sidecar-softhsm:
+    container_name: pkcs11-sidecar-softhsm
+    image: pkcs11-sidecar-softhsm:local
+    restart: unless-stopped
+    ports:
+      - 8291:8051
+    environment:
+      - SOFTHSM_TOKEN_LABEL=softhsm
+      - SOFTHSM_USER_PIN=${SOFTHSM_USER_PIN:-1234}
+      - SOFTHSM_SO_PIN=${SOFTHSM_SO_PIN:-5678}
+    volumes:
+      - pkcs11-softhsm-tokens:/var/lib/pkcs11-vendor/tokens
+    healthcheck:
+      test: nc -z 127.0.0.1 8051
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - pkcs11-cryptography-provider-standalone
+      - all
+
   ip-discovery-provider:
     container_name: ip-discovery-provider
     image: ilm-ip-discovery-provider
@@ -549,3 +603,6 @@ services:
     profiles:
       - ntp-standalone
       - all
+
+volumes:
+  pkcs11-softhsm-tokens:

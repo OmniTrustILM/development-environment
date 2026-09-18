@@ -361,3 +361,11 @@ Run `./scripts/timestamping-setup.sh --help` for the full option list (connector
 ## Connectors and technologies
 
 To have a complete setup, you need a technology available for the connectors. For example, if you would like to work with the Authority Provider functions, you should have an appropriate connector running that is able to communicate with the target technology.
+
+## PKCS#11 connector and its sidecars
+
+The `pkcs11-cryptography-provider-standalone` profile starts the PKCS#11 connector together
+with SoftHSM proxy sidecar. `pkcs11/profiles.json` lists one config profile per sidecar,
+and the connector offers those names as the `profile` token attribute.
+
+SoftHSM needs no additional configuration — the sidecar image ships an already initialized token.
