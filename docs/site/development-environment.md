@@ -344,9 +344,11 @@ The account is registered with the dummy certificate bundled in `scripts/first-a
 
 ### timestamping-setup.sh
 
-End-to-end provisioning script that creates all the platform objects required for a timestamping environment: five connectors, a SoftKeyStore credential, an EJBCA authority, a soft token and token profile, a Time Quality configuration, a vault instance and vault profile, a mapped user and role, and two TSA sets (non-qualified and qualified), each with a key pair, RA profile, certificate, TSP profile, signing profile, and Basic credential.
+End-to-end provisioning script that creates all the platform objects required for a timestamping environment: five connectors, a SoftKeyStore credential, an EJBCA authority, a token and token profile on the chosen cryptography provider, a Time Quality configuration, a vault instance and vault profile, a mapped user and role, and two TSA sets (non-qualified and qualified), each with a key pair, RA profile, certificate, TSP profile, signing profile, and Basic credential.
 
-The connector services it registers must already be running — start them with the `all` profile or their `[service name]-standalone` profiles. The defaults expect the Compose port mappings: `common-credential-provider` on `8200`, `ejbca-ng-connector` on `8210`, `software-cryptography-provider` on `8230`, and `timestamp-formatting-connector` on `8270`.
+The connector services it registers must already be running — start them with their `[service name]-standalone` profiles. The defaults expect the Compose port mappings: `common-credential-provider` on `8200`, `ejbca-ng-connector` on `8210`, `software-cryptography-provider` on `8230`, and `timestamp-formatting-connector` on `8270`.
+
+`--crypto-provider` chooses where the TSA keys live. `software-v2`, the default, and `software-v1` register `software-cryptography-provider` as a v2 or a v1 connector. `pkcs11` registers `pkcs11-cryptography-provider`, on `8290` by default, and reads the token user PIN from the environment variable that `--pin-env` names.
 
 ```bash
 ./scripts/timestamping-setup.sh \
