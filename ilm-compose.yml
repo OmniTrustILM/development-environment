@@ -359,8 +359,7 @@ services:
     ports:
       - "8290:8080"
     environment:
-      - APP_ADDR=:8080
-      - APP_PROFILES_FILE=/etc/pkcs11-cryptography-provider/profiles.json
+      - PKCS11_PROFILES_FILE=/etc/pkcs11-cryptography-provider/profiles.json
     volumes:
       - ./pkcs11/profiles.json:/etc/pkcs11-cryptography-provider/profiles.json:ro
     # Local PKCS#11 simulators can run on separate VMs, so they are reached
