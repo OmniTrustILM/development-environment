@@ -6,14 +6,12 @@
 # must also be reflected in that script.
 #
 # Automates the ILM timestamping environment setup:
-#   1. Creates five connectors (credential-provider v1, EJBCA, the --crypto-provider connector,
-#      timestamp-formatting-connector, and a credential-provider v2 registration used as the vault
-#      via its `secret` interface)
+#   1. Creates connectors (credential-provider v1 for credentials, credential-provider v2 for secrets,
+#      EJBCA, the --crypto-provider connector, and timestamp-formatting-connector)
 #   2. Creates a SoftKeyStore credential from a PKCS12 bundle
 #   3. Creates an EJBCA authority instance
 #   4. Discovers the vault instance (by name)
-#   5. Creates a vault profile under it (the vault profile backs the TSP profiles' Basic credentials
-#      and, on pkcs11, the secret holding the token user PIN)
+#   5. Creates a vault profile under it, for TSP profiles' Basic credentials and PKCS#11 token's user PIN
 #   6. Creates a token on the --crypto-provider connector
 #   7. Creates a token profile
 #   8. Creates a Time Quality configuration (used by the qualified signing profile)
@@ -59,15 +57,14 @@ PORT_TIMESTAMP_FORMATTING="8270"
 
 # Cryptography provider the TSA keys live on:
 #   software-v1 - software-cryptography-provider registered as a v1 connector
-#   software-v2 - the same provider registered as a v2 connector
-#   pkcs11      - pkcs11-cryptography-provider, a v2 connector
+#   software-v2 - software-cryptography-provider registered as a v2 connector
+#   pkcs11      - pkcs11-cryptography-provider (v2 only)
 CRYPTO_PROVIDER="software-v2"
 PKCS11_PROFILE="softhsm"      # config profile, which names the proxy sidecar
 PKCS11_TOKEN="softhsm"        # token label, as the token's PKCS#11 URI states it
 PIN_ENV="SOFTHSM_USER_PIN"    # environment variable holding the pkcs11 token user PIN
 
-# Names the --crypto-provider connector gives its key-pair attributes, set by configure_crypto_provider.
-# The contract reserves only keyExportable and signatureAlgorithm, so every other name is the connector's own.
+# Attributes exposed by the corresponding --crypto-provider connector.
 KEY_ALGORITHM_ATTR=""
 KEY_SPEC_GROUP=""
 KEY_ALIAS_ATTR=""
@@ -236,13 +233,12 @@ Vault / Basic credential options:
 
 Cryptography provider options:
   --crypto-provider PROVIDER  Where the TSA keys live     (default: software-v2)
-                              software-v1  software-cryptography-provider registered as a v1 connector
-                              software-v2  software-cryptography-provider registered as a v2 connector
-                              pkcs11       pkcs11-cryptography-provider, a v2 connector
-  --pkcs11-profile NAME       pkcs11 config profile, naming the proxy sidecar  (default: softhsm)
-  --pkcs11-token LABEL        pkcs11 token label, as its PKCS#11 URI states it (default: softhsm)
-  --pin-env VAR               Environment variable holding the pkcs11 token user PIN
-                              (default: SOFTHSM_USER_PIN). Read once, to create the PIN secret.
+                              software-v1  software-cryptography-provider (v1 connector)
+                              software-v2  software-cryptography-provider (v2 connector)
+                              pkcs11       pkcs11-cryptography-provider   (v2-only connector)
+  --pkcs11-profile NAME       pkcs11 config profile, specifying the proxy sidecar  (default: softhsm)
+  --pkcs11-token LABEL        pkcs11 token label (default: softhsm)
+  --pin-env VAR               env. variable with pkcs11 token user PIN (default: SOFTHSM_USER_PIN)
 
 Credential/token options:
   --pkcs12-password PASS      PKCS12 bundle password     (default: 00000000)
@@ -390,9 +386,6 @@ group_uuid() {
 }
 
 # request_attribute ATTRS_JSON NAME CONTENT_JSON
-# The request attribute NAME carrying CONTENT_JSON, in the version its definition states. Core
-# compares a list value with the items the definition offers as they are, and only a v3 item names
-# its content type, so an item sent in the other version is refused as not part of the list.
 request_attribute() {
   local attrs="$1" name="$2" content="$3"
   [[ -z "$(echo "$attrs" | jq -r --arg n "$name" 'first(.[] | select(.name==$n) | .uuid) // empty')" ]] \
@@ -408,8 +401,6 @@ request_attribute() {
 }
 
 # chosen_attribute ATTRS_JSON NAME VALUE
-# The request attribute NAME set to the item its definition offers for VALUE, with the item's data
-# and reference as offered.
 chosen_attribute() {
   local attrs="$1" name="$2" value="$3" item
   item=$(echo "$attrs" | jq -c --arg n "$name" --arg v "$value" \
@@ -551,7 +542,7 @@ validate() {
     *) echo "ERROR: --crypto-provider must be software-v1, software-v2 or pkcs11 (got '$CRYPTO_PROVIDER')"; errors=$((errors+1)) ;;
   esac
   [[ "$PIN_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
-    || { echo "ERROR: --pin-env must name an environment variable (got '$PIN_ENV')"; errors=$((errors+1)); }
+    || { echo "ERROR: --pin-env must reference an environment variable (got '$PIN_ENV')"; errors=$((errors+1)); }
   [[ $errors -gt 0 ]] && usage
 
   [[ ! -f "$PKCS12_BUNDLE" ]]   && { echo "ERROR: PKCS12 bundle not found: $PKCS12_BUNDLE"; exit 1; }
@@ -570,14 +561,14 @@ validate() {
 configure_crypto_provider() {
   case "$CRYPTO_PROVIDER" in
     software-v1)
-      KEY_ALGORITHM_ATTR="data_keyAlgorithm"; KEY_SPEC_GROUP="group_keySpec";   KEY_ALIAS_ATTR="data_keyAlias"
+      KEY_ALGORITHM_ATTR="data_keyAlgorithm"; KEY_SPEC_GROUP="group_keySpec";     KEY_ALIAS_ATTR="data_keyAlias"
       RSA_KEY_SIZE_ATTR="data_rsaKeySize";    MLDSA_LEVEL_ATTR="data_mldsaLevel"; MLDSA_PREHASH_ATTR="data_mldsaPrehash" ;;
     software-v2)
-      KEY_ALGORITHM_ATTR="data_keyAlgorithm"; KEY_SPEC_GROUP="group_keySpecV2"; KEY_ALIAS_ATTR="data_keyAlias"
+      KEY_ALGORITHM_ATTR="data_keyAlgorithm"; KEY_SPEC_GROUP="group_keySpecV2";   KEY_ALIAS_ATTR="data_keyAlias"
       RSA_KEY_SIZE_ATTR="data_rsaKeySize";    MLDSA_LEVEL_ATTR="data_mldsaLevel"; MLDSA_PREHASH_ATTR="" ;;
     pkcs11)
-      KEY_ALGORITHM_ATTR="keyAlgorithm";      KEY_SPEC_GROUP="keySpec";         KEY_ALIAS_ATTR="keyLabel"
-      RSA_KEY_SIZE_ATTR="rsaKeySize";         MLDSA_LEVEL_ATTR="mlDsaLevel";    MLDSA_PREHASH_ATTR="" ;;
+      KEY_ALGORITHM_ATTR="keyAlgorithm";      KEY_SPEC_GROUP="keySpec";           KEY_ALIAS_ATTR="keyLabel"
+      RSA_KEY_SIZE_ATTR="rsaKeySize";         MLDSA_LEVEL_ATTR="mlDsaLevel";      MLDSA_PREHASH_ATTR="" ;;
   esac
 }
 
@@ -686,8 +677,6 @@ extract_p12_pem() {
 # On a pre-provisioned instance they're already registered, in WAITING_FOR_APPROVAL status.
 # v1 connectors are matched by function group + kind;
 # v2 connectors are matched by provided interface and feature flag.
-# A v2 cryptography provider is matched by URL and version: one URL can be registered once as v1 and
-# once as v2, and each token stays with the registration it was created under.
 CONNECTORS_V1_JSON=""
 CONNECTORS_V2_JSON=""
 
@@ -753,10 +742,10 @@ setup_connectors() {
 
   case "$CRYPTO_PROVIDER" in
     software-v1)
-      discover_or_create_connector CRYPTO_CONN_UUID CRYPTO_CONN_NAME "software-cryptography-provider" \
-        "cryptography-provider" "$CONNECTORS_V1_JSON" \
+      discover_or_create_connector CRYPTO_CONN_UUID CRYPTO_CONN_NAME "software-cryptography-provider-v1" \
+        "cryptography-provider v1" "$CONNECTORS_V1_JSON" \
         '(.functionGroups // []) | any(.functionGroupCode=="cryptographyProvider" and ((.kinds // []) | index("SOFT")))' \
-        create_crypto_connector ;;
+        create_crypto_connector_v1 ;;
     software-v2)
       discover_or_create_connector CRYPTO_CONN_UUID CRYPTO_CONN_NAME "software-cryptography-provider-v2" \
         "cryptography-provider v2" "$CONNECTORS_V2_JSON" \
@@ -795,7 +784,7 @@ create_connector() {
 
 create_cred_connector()                 { create_connector "common-credential-provider"           "$PORT_CRED_PROVIDER"        "v1" "credential-provider connector (port ${PORT_CRED_PROVIDER})"; }
 create_ejbca_connector()                { create_connector "ejbca-ng-connector"                   "$PORT_EJBCA"                "v1" "ejbca-ng connector (port ${PORT_EJBCA})"; }
-create_crypto_connector()               { create_connector "software-cryptography-provider"       "$PORT_CRYPTO_PROVIDER"      "v1" "software-cryptography-provider connector (port ${PORT_CRYPTO_PROVIDER})"; }
+create_crypto_connector_v1()            { create_connector "software-cryptography-provider-v1"    "$PORT_CRYPTO_PROVIDER"      "v1" "software-cryptography-provider v1 connector (port ${PORT_CRYPTO_PROVIDER})"; }
 create_crypto_connector_v2()            { create_connector "software-cryptography-provider-v2"    "$PORT_CRYPTO_PROVIDER"      "v2" "software-cryptography-provider v2 connector (port ${PORT_CRYPTO_PROVIDER})"; }
 create_pkcs11_connector()               { create_connector "pkcs11-cryptography-provider"         "$PORT_PKCS11_PROVIDER"      "v2" "pkcs11-cryptography-provider connector (port ${PORT_PKCS11_PROVIDER})"; }
 create_timestamp_formatting_connector() { create_connector "$TIMESTAMP_FORMATTING_CONNECTOR_NAME" "$PORT_TIMESTAMP_FORMATTING" "v2" "timestamp-formatting-connector (port ${PORT_TIMESTAMP_FORMATTING})"; }
@@ -949,8 +938,7 @@ setup_vault_instance() {
   ok "vault instance  $VAULT_INSTANCE_UUID"
 }
 
-# connector_interface_uuid <connector_uuid> <interface_code> -- uuid of the connector's interface with
-# that code, which a vault instance and a v2 callback name as interfaceUuid.
+# connector_interface_uuid <connector_uuid> <interface_code>
 connector_interface_uuid() {
   local connector_uuid="$1" code="$2" iface
   iface=$(list_paginated /v2/connectors/list | jq -r --arg u "$connector_uuid" --arg c "$code" \
@@ -960,8 +948,7 @@ connector_interface_uuid() {
 }
 
 # --- Step 5: Vault profile ----------------------------------------------------
-# Created under the (reused) vault instance; backs the TSP profiles' Basic credentials and, on
-# pkcs11, the secret holding the token user PIN.
+# Created under the (reused) vault instance; backs the TSP profiles' Basic credentials and token's user PIN.
 # The connector requires no profile data attributes, so the request sends an empty attributes array.
 setup_vault_profile() {
   local _resp _existing _list
@@ -990,8 +977,7 @@ setup_vault_profile() {
 }
 
 # --- Step 6: Token ------------------------------------------------------------
-# A token is reused by name only when it lives on the --crypto-provider connector. The same name on
-# another registration is another token, which every later step would reach through the wrong connector.
+# A token is reused by name only when it lives on the --crypto-provider connector.
 setup_token() {
   local _resp _existing _list token_attrs kind=""
 
@@ -1028,8 +1014,7 @@ setup_token() {
 # attribute schemas depending on whether it already has any token instances:
 #   - empty connector  -> data_createTokenAction/newTokenName/tokenCode at top level
 #   - has token(s)     -> a 'data_options' selector whose 'group_loadToken' callback (option=new) yields the real create attributes
-# This script may run against either state, so it must handle both. A v1 registration serves the
-# form and its callback under the function group and kind, a v2 one under the connector alone.
+# This script may run against either state, so it must handle both.
 software_token_attributes() {
   local token_attr_defs form_path callback_path load_group_uuid create_attrs options_attr=""
   local action_attr name_attr code_attr
@@ -1067,22 +1052,19 @@ software_token_attributes() {
     '[$action, $name, $code] + (if $options == "" then [] else [$options | fromjson] end)'
 }
 
-# percent_decode TEXT -- TEXT with each %XX escape replaced by the byte it stands for. Backslashes are
-# doubled first, so printf '%b' expands only the escapes made here.
+# percent_decode TEXT
 percent_decode() {
   local text="${1//\\/\\\\}"
   printf '%b' "${text//%/\\x}"
 }
 
-# pkcs11_uri_token_label URI -- the token label a PKCS#11 URI states, which the URI percent-encodes.
+# pkcs11_uri_token_label URI
 pkcs11_uri_token_label() {
   percent_decode "$(jq -rn --arg uri "$1" \
     '$uri | ltrimstr("pkcs11:") | split("?")[0] | split(";")[] | select(startswith("token=")) | ltrimstr("token=")')"
 }
 
-# A pkcs11 token is addressed by its config profile, which names the proxy sidecar, and by the PKCS#11
-# URI of one token on that sidecar. The URI also states the token's serial and slot, which change
-# whenever the token is re-created, so the token is chosen by the label its URI states.
+# A pkcs11 token is addressed by its config profile (ref proxy sidecar), and PKCS#11 URI of a token.
 pkcs11_token_attributes() {
   local token_attr_defs profile_attr token_attr_uuid iface_uuid offered item matches token_attr pin_attr
 
@@ -1116,10 +1098,6 @@ pkcs11_token_attributes() {
     '[$profile, $token, $pin]'
 }
 
-# The pkcs11 token user PIN is kept as a vault secret, which the token's `pin` attribute refers to.
-# jq reads the PIN from the environment and curl reads the request from stdin, so the PIN is on no
-# command line. A new secret settles into `active` before it can be enabled: enabling it earlier is
-# undone by the tail of its creation.
 setup_pin_secret() {
   local _list _existing _resp attempt state="" enabled=""
   PIN_SECRET_NAME="${TOKEN_NAME}-pin"
@@ -1326,8 +1304,7 @@ key_algorithm_code() {
   esac
 }
 
-# 1952 bytes, which tells an ML-DSA-65 public key from those of the other parameter sets.
-MLDSA65_PUBLIC_KEY_BITS=15616
+MLDSA65_PUBLIC_KEY_BITS=15616 # 1952 bytes
 
 # An existing key is matched by name alone, so a rerun that changes --key-algorithm or
 # --crypto-provider would otherwise reuse the old material and report the requested algorithm over it.
@@ -1358,9 +1335,6 @@ require_key_spec() {
   die "Existing key '${key_name}' (${key_uuid}) is ${spec:-of an unknown key spec}, but --key-algorithm ${KEY_ALGORITHM} provisions ${want_spec}; ${hint}"
 }
 
-# An RSA key signs PKCS#1 v1.5 with SHA-384. Core presents a v2 RSA key's signature algorithms through
-# the same scheme and digest fields as a v1 one, so this holds on every provider. An ML-DSA key's
-# parameter set decides its signature, so it is asked nothing.
 # Usage: signing_operation_attributes <attrs_json>
 signing_operation_attributes() {
   local attrs="$1" sig_scheme sig_digest
@@ -1375,8 +1349,7 @@ signing_operation_attributes() {
   jq -nc --argjson scheme "$sig_scheme" --argjson digest "$sig_digest" '[$scheme, $digest]'
 }
 
-# The key spec is a group the connector resolves once the algorithm is chosen. A v1 provider takes
-# the algorithm as a path variable, a v2 provider takes the chosen algorithm attribute.
+# The key spec is a group the connector resolves once the algorithm is chosen.
 # Usage: key_spec_definitions <keypair_attr_defs> <algorithm_code> <key_alg_attr_json>
 key_spec_definitions() {
   local keypair_attr_defs="$1" algorithm_code="$2" key_alg_attr="$3" key_spec_group_uuid
