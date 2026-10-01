@@ -1324,9 +1324,11 @@ require_key_spec() {
     [[ "$length" != "$MLDSA65_PUBLIC_KEY_BITS" ]] \
       && die "Existing key '${key_name}' (${key_uuid}) has a ${length:-?}-bit ML-DSA public key, but --key-algorithm MLDSA provisions ML-DSA-65, whose public key has ${MLDSA65_PUBLIC_KEY_BITS} bits; ${hint}"
     # Only the v1 software provider records a prehash flag, in the private key item.
-    prehash=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Private") | .keyData | fromjson? | objects | .prehash) // empty')
-    [[ "$prehash" == "true" ]] \
-      && die "Existing key '${key_name}' (${key_uuid}) is a prehash ML-DSA key, but --key-algorithm MLDSA provisions pure ML-DSA-65; ${hint}"
+    if [[ "$CRYPTO_PROVIDER" == "software-v1" ]]; then
+      prehash=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Private") | .keyData | fromjson? | objects | .prehash | select(. != null) | tostring) // empty')
+      [[ "$prehash" != "false" ]] \
+        && die "Existing key '${key_name}' (${key_uuid}) records prehash=${prehash:-nothing}, but --key-algorithm MLDSA provisions pure ML-DSA-65; ${hint}"
+    fi
     return 0
   fi
   spec=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Public") | "RSA \(.length) bits") // empty')
