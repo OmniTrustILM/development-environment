@@ -6,15 +6,15 @@
 # must also be reflected in that script.
 #
 # Automates the ILM timestamping environment setup:
-#   1. Creates five connectors (credential-provider v1, EJBCA, crypto-provider, timestamp-formatting-connector,
-#      and a credential-provider v2 registration used as the vault via its `secret` interface)
+#   1. Creates connectors (credential-provider v1 for credentials, credential-provider v2 for secrets,
+#      EJBCA, the --crypto-provider connector, and timestamp-formatting-connector)
 #   2. Creates a SoftKeyStore credential from a PKCS12 bundle
 #   3. Creates an EJBCA authority instance
-#   4. Creates a soft token
-#   5. Creates a token profile
-#   6. Creates a Time Quality configuration (used by the qualified signing profile)
-#   7. Discovers the vault instance (by name)
-#   8. Creates a vault profile under it (the vault profile backs the TSP profiles' Basic credentials)
+#   4. Discovers the vault instance (by name)
+#   5. Creates a vault profile under it, for TSP profiles' Basic credentials and PKCS#11 token's user PIN
+#   6. Creates a token on the --crypto-provider connector
+#   7. Creates a token profile
+#   8. Creates a Time Quality configuration (used by the qualified signing profile)
 #   9. Creates the dedicated mapped user, authenticating with Basic credentials
 #  10. Creates the timestamping role and attaches it to that user (its permissions are granted in step 20)
 #   For each of two sets (non-qualified / qualified):
@@ -52,7 +52,25 @@ CONNECTOR_HOST="localhost"
 PORT_CRED_PROVIDER="8200"
 PORT_EJBCA="8210"
 PORT_CRYPTO_PROVIDER="8230"
+PORT_PKCS11_PROVIDER="8290"
 PORT_TIMESTAMP_FORMATTING="8270"
+
+# Cryptography provider the TSA keys live on:
+#   software-v1 - software-cryptography-provider registered as a v1 connector
+#   software-v2 - software-cryptography-provider registered as a v2 connector
+#   pkcs11      - pkcs11-cryptography-provider (v2 only)
+CRYPTO_PROVIDER="software-v2"
+PKCS11_PROFILE="softhsm"      # config profile, which names the proxy sidecar
+PKCS11_TOKEN="softhsm"        # token label, as the token's PKCS#11 URI states it
+PIN_ENV="SOFTHSM_USER_PIN"    # environment variable holding the pkcs11 token user PIN
+
+# Attributes exposed by the corresponding --crypto-provider connector.
+KEY_ALGORITHM_ATTR=""
+KEY_SPEC_GROUP=""
+KEY_ALIAS_ATTR=""
+RSA_KEY_SIZE_ATTR=""
+MLDSA_LEVEL_ATTR=""
+MLDSA_PREHASH_ATTR=""         # empty where the connector offers pure ML-DSA only
 
 PKCS12_BUNDLE=""
 PKCS12_PASSWORD="00000000"
@@ -139,6 +157,8 @@ VAULT_CONN_UUID=""                 VAULT_CONN_NAME=""
 CRED_UUID=""
 AUTH_UUID=""
 TOKEN_UUID=""
+PIN_SECRET_NAME=""
+PIN_SECRET_UUID=""
 TOKEN_PROFILE_UUID=""
 VAULT_INSTANCE_UUID=""
 VAULT_PROFILE_UUID=""
@@ -192,11 +212,12 @@ Required:
                               Actual CNs will be <PREFIX>-non-qualified and <PREFIX>-qualified.
   Plus the admin credential for the chosen --auth-mode (see "ILM API auth").
 
-Connector options (defaults: localhost, ports 8200/8210/8230/8270):
+Connector options (defaults: localhost, ports 8200/8210/8230/8290/8270):
   --connector-host HOST            hostname for connectors as seen from ILM server
   --port-cred-provider PORT        common-credential-provider port     (default: 8200)
   --port-ejbca PORT                ejbca-ng-connector port             (default: 8210)
   --port-crypto-provider PORT      software-cryptography-provider port (default: 8230)
+  --port-pkcs11-provider PORT      pkcs11-cryptography-provider port   (default: 8290)
   --port-timestamp-formatting PORT timestamp-formatting-connector port (default: 8270)
   --timestamp-formatting-connector-name NAME
                                    timestamp formatting connector name (default: timestamp-formatting-connector)
@@ -210,9 +231,18 @@ Vault / Basic credential options:
   --tsp-credential-username NAME  Basic credential username (default: f.jednicka)
   --tsp-credential-password PASS  Basic credential password (default: tsp-test-changeme)
 
+Cryptography provider options:
+  --crypto-provider PROVIDER  Where the TSA keys live     (default: software-v2)
+                              software-v1  software-cryptography-provider (v1 connector)
+                              software-v2  software-cryptography-provider (v2 connector)
+                              pkcs11       pkcs11-cryptography-provider   (v2-only connector)
+  --pkcs11-profile NAME       pkcs11 config profile, specifying the proxy sidecar  (default: softhsm)
+  --pkcs11-token LABEL        pkcs11 token label (default: softhsm)
+  --pin-env VAR               env. variable with pkcs11 token user PIN (default: SOFTHSM_USER_PIN)
+
 Credential/token options:
   --pkcs12-password PASS      PKCS12 bundle password     (default: 00000000)
-  --token-password PASS       Soft token PIN             (default: same as pkcs12-password)
+  --token-password PASS       Software provider token code (default: same as pkcs12-password)
 
 ILM API auth:
   --ilm-host HOST             URL of ILM API                (default: http://localhost:8080)
@@ -321,22 +351,25 @@ require_uuid() {
   echo "$uuid"
 }
 
+# die_missing_attribute ATTRS_JSON EXPECTATION
+# Prints each received attribute so the script can be updated.
+die_missing_attribute() {
+  echo "ERROR: Expected ${2} -- not found." >&2
+  echo "       Received attributes:" >&2
+  echo "$1" | jq -r \
+    '.[] | "         name=\(.name)  contentType=\(.contentType // "(none)")  type=\(.type)"' >&2
+  exit 1
+}
+
 # attr_uuid ATTRS_JSON EXPECTED_NAME EXPECTED_CONTENT_TYPE
 # Looks up the uuid of an attribute by name + contentType (the stable contract).
-# On mismatch, prints each received attribute so the script can be updated.
 attr_uuid() {
   local attrs="$1" name="$2" content_type="$3"
   local uuid
   uuid=$(echo "$attrs" | jq -r \
     --arg n "$name" --arg ct "$content_type" \
     'first(.[] | select(.name==$n and .contentType==$ct) | .uuid) // empty')
-  if [[ -z "$uuid" ]]; then
-    echo "ERROR: Expected attribute  name='${name}'  contentType='${content_type}' -- not found." >&2
-    echo "       Received attributes:" >&2
-    echo "$attrs" | jq -r \
-      '.[] | "         name=\(.name)  contentType=\(.contentType // "(none)")  type=\(.type)"' >&2
-    exit 1
-  fi
+  [[ -z "$uuid" ]] && die_missing_attribute "$attrs" "attribute  name='${name}'  contentType='${content_type}'"
   echo "$uuid"
 }
 
@@ -348,14 +381,37 @@ group_uuid() {
   uuid=$(echo "$attrs" | jq -r \
     --arg n "$name" \
     'first(.[] | select(.name==$n and .type=="group") | .uuid) // empty')
-  if [[ -z "$uuid" ]]; then
-    echo "ERROR: Expected group attribute  name='${name}' -- not found." >&2
-    echo "       Received attributes:" >&2
-    echo "$attrs" | jq -r \
-      '.[] | "         name=\(.name)  contentType=\(.contentType // "(none)")  type=\(.type)"' >&2
-    exit 1
-  fi
+  [[ -z "$uuid" ]] && die_missing_attribute "$attrs" "group attribute  name='${name}'"
   echo "$uuid"
+}
+
+# request_attribute ATTRS_JSON NAME CONTENT_JSON
+request_attribute() {
+  local attrs="$1" name="$2" content="$3"
+  [[ -z "$(echo "$attrs" | jq -r --arg n "$name" 'first(.[] | select(.name==$n) | .uuid) // empty')" ]] \
+    && die_missing_attribute "$attrs" "attribute  name='${name}'"
+  echo "$attrs" | jq -c --arg n "$name" --argjson content "$content" '
+    first(.[] | select(.name==$n)) as $d
+    | if ($d.version | tostring | ltrimstr("v")) == "3"
+      then {name: $n, content: ($content | map({contentType: $d.contentType} + .)),
+            contentType: $d.contentType, uuid: $d.uuid, version: "v3"}
+      else {name: $n, content: ($content | map(del(.contentType))),
+            contentType: $d.contentType, uuid: $d.uuid, version: "v2"}
+      end'
+}
+
+# chosen_attribute ATTRS_JSON NAME VALUE
+chosen_attribute() {
+  local attrs="$1" name="$2" value="$3" item
+  item=$(echo "$attrs" | jq -c --arg n "$name" --arg v "$value" \
+    'first(.[] | select(.name==$n) | .content[]? | select((.data | tostring) == $v)) // empty')
+  if [[ -z "$item" ]]; then
+    [[ -z "$(echo "$attrs" | jq -r --arg n "$name" 'first(.[] | select(.name==$n) | .uuid) // empty')" ]] \
+      && die_missing_attribute "$attrs" "attribute  name='${name}'"
+    die "Attribute '${name}' offers no value '${value}'. Offered: $(echo "$attrs" \
+      | jq -c --arg n "$name" '[.[] | select(.name==$n) | .content[]?.data]')"
+  fi
+  request_attribute "$attrs" "$name" "$(echo "$item" | jq -c '[.]')"
 }
 
 # --- Idempotent reuse helpers -------------------------------------------------
@@ -406,6 +462,11 @@ parse_args() {
       --port-cred-provider)                     PORT_CRED_PROVIDER="$2";                     shift 2 ;;
       --port-ejbca)                             PORT_EJBCA="$2";                             shift 2 ;;
       --port-crypto-provider)                   PORT_CRYPTO_PROVIDER="$2";                   shift 2 ;;
+      --port-pkcs11-provider)                   PORT_PKCS11_PROVIDER="$2";                   shift 2 ;;
+      --crypto-provider)                        CRYPTO_PROVIDER="$2";                        shift 2 ;;
+      --pkcs11-profile)                         PKCS11_PROFILE="$2";                         shift 2 ;;
+      --pkcs11-token)                           PKCS11_TOKEN="$2";                           shift 2 ;;
+      --pin-env)                                PIN_ENV="$2";                                shift 2 ;;
       --port-timestamp-formatting)              PORT_TIMESTAMP_FORMATTING="$2";              shift 2 ;;
       --timestamp-formatting-connector-name)    TIMESTAMP_FORMATTING_CONNECTOR_NAME="$2";    shift 2 ;;
       --vault-connector-name)                   VAULT_CONNECTOR_NAME="$2";                   shift 2 ;;
@@ -475,6 +536,13 @@ validate() {
     MLDSA|ML-DSA) KEY_ALGORITHM="MLDSA" ;;
     *) echo "ERROR: --key-algorithm must be RSA or MLDSA (got '$KEY_ALGORITHM')"; errors=$((errors+1)) ;;
   esac
+  CRYPTO_PROVIDER=$(echo "$CRYPTO_PROVIDER" | tr '[:upper:]' '[:lower:]')
+  case "$CRYPTO_PROVIDER" in
+    software-v1|software-v2|pkcs11) ;;
+    *) echo "ERROR: --crypto-provider must be software-v1, software-v2 or pkcs11 (got '$CRYPTO_PROVIDER')"; errors=$((errors+1)) ;;
+  esac
+  [[ "$PIN_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+    || { echo "ERROR: --pin-env must reference an environment variable (got '$PIN_ENV')"; errors=$((errors+1)); }
   [[ $errors -gt 0 ]] && usage
 
   [[ ! -f "$PKCS12_BUNDLE" ]]   && { echo "ERROR: PKCS12 bundle not found: $PKCS12_BUNDLE"; exit 1; }
@@ -487,6 +555,21 @@ validate() {
 
   validate_json_summary_destination
   configure_authentication
+  configure_crypto_provider
+}
+
+configure_crypto_provider() {
+  case "$CRYPTO_PROVIDER" in
+    software-v1)
+      KEY_ALGORITHM_ATTR="data_keyAlgorithm"; KEY_SPEC_GROUP="group_keySpec";     KEY_ALIAS_ATTR="data_keyAlias"
+      RSA_KEY_SIZE_ATTR="data_rsaKeySize";    MLDSA_LEVEL_ATTR="data_mldsaLevel"; MLDSA_PREHASH_ATTR="data_mldsaPrehash" ;;
+    software-v2)
+      KEY_ALGORITHM_ATTR="data_keyAlgorithm"; KEY_SPEC_GROUP="group_keySpecV2";   KEY_ALIAS_ATTR="data_keyAlias"
+      RSA_KEY_SIZE_ATTR="data_rsaKeySize";    MLDSA_LEVEL_ATTR="data_mldsaLevel"; MLDSA_PREHASH_ATTR="" ;;
+    pkcs11)
+      KEY_ALGORITHM_ATTR="keyAlgorithm";      KEY_SPEC_GROUP="keySpec";           KEY_ALIAS_ATTR="keyLabel"
+      RSA_KEY_SIZE_ATTR="rsaKeySize";         MLDSA_LEVEL_ATTR="mlDsaLevel";      MLDSA_PREHASH_ATTR="" ;;
+  esac
 }
 
 validate_json_summary_destination() {
@@ -657,10 +740,23 @@ setup_connectors() {
     create_ejbca_connector
   ok "$EJBCA_CONN_NAME  $EJBCA_CONN_UUID"
 
-  discover_or_create_connector CRYPTO_CONN_UUID CRYPTO_CONN_NAME "software-cryptography-provider" \
-    "cryptography-provider" "$CONNECTORS_V1_JSON" \
-    '(.functionGroups // []) | any(.functionGroupCode=="cryptographyProvider" and ((.kinds // []) | index("SOFT")))' \
-    create_crypto_connector
+  case "$CRYPTO_PROVIDER" in
+    software-v1)
+      discover_or_create_connector CRYPTO_CONN_UUID CRYPTO_CONN_NAME "software-cryptography-provider-v1" \
+        "cryptography-provider v1" "$CONNECTORS_V1_JSON" \
+        '(.functionGroups // []) | any(.functionGroupCode=="cryptographyProvider" and ((.kinds // []) | index("SOFT")))' \
+        create_crypto_connector_v1 ;;
+    software-v2)
+      discover_or_create_connector CRYPTO_CONN_UUID CRYPTO_CONN_NAME "software-cryptography-provider-v2" \
+        "cryptography-provider v2" "$CONNECTORS_V2_JSON" \
+        ".url==\"http://${CONNECTOR_HOST}:${PORT_CRYPTO_PROVIDER}\" and .version==\"v2\"" \
+        create_crypto_connector_v2 ;;
+    pkcs11)
+      discover_or_create_connector CRYPTO_CONN_UUID CRYPTO_CONN_NAME "pkcs11-cryptography-provider" \
+        "pkcs11-cryptography-provider" "$CONNECTORS_V2_JSON" \
+        ".url==\"http://${CONNECTOR_HOST}:${PORT_PKCS11_PROVIDER}\" and .version==\"v2\"" \
+        create_pkcs11_connector ;;
+  esac
   ok "$CRYPTO_CONN_NAME  $CRYPTO_CONN_UUID"
 
   discover_or_create_connector TIMESTAMP_FORMATTING_CONN_UUID TIMESTAMP_FORMATTING_CONN_NAME \
@@ -688,7 +784,9 @@ create_connector() {
 
 create_cred_connector()                 { create_connector "common-credential-provider"           "$PORT_CRED_PROVIDER"        "v1" "credential-provider connector (port ${PORT_CRED_PROVIDER})"; }
 create_ejbca_connector()                { create_connector "ejbca-ng-connector"                   "$PORT_EJBCA"                "v1" "ejbca-ng connector (port ${PORT_EJBCA})"; }
-create_crypto_connector()               { create_connector "software-cryptography-provider"       "$PORT_CRYPTO_PROVIDER"      "v1" "software-cryptography-provider connector (port ${PORT_CRYPTO_PROVIDER})"; }
+create_crypto_connector_v1()            { create_connector "software-cryptography-provider-v1"    "$PORT_CRYPTO_PROVIDER"      "v1" "software-cryptography-provider v1 connector (port ${PORT_CRYPTO_PROVIDER})"; }
+create_crypto_connector_v2()            { create_connector "software-cryptography-provider-v2"    "$PORT_CRYPTO_PROVIDER"      "v2" "software-cryptography-provider v2 connector (port ${PORT_CRYPTO_PROVIDER})"; }
+create_pkcs11_connector()               { create_connector "pkcs11-cryptography-provider"         "$PORT_PKCS11_PROVIDER"      "v2" "pkcs11-cryptography-provider connector (port ${PORT_PKCS11_PROVIDER})"; }
 create_timestamp_formatting_connector() { create_connector "$TIMESTAMP_FORMATTING_CONNECTOR_NAME" "$PORT_TIMESTAMP_FORMATTING" "v2" "timestamp-formatting-connector (port ${PORT_TIMESTAMP_FORMATTING})"; }
 create_vault_connector()                { create_connector "$VAULT_CONNECTOR_NAME"                "$PORT_CRED_PROVIDER"        "v2" "credential-provider v2 connector for vault use (port ${PORT_CRED_PROVIDER})"; }
 
@@ -812,77 +910,231 @@ setup_authority() {
   ok "authority  $AUTH_UUID"
 }
 
-# --- Step 4: Token ------------------------------------------------------------
+# --- Step 4: Vault instance ---------------------------------------------------
+# Created (or reused) under the credential-provider v2 connector, bound to its `secret` interface.
+# The connector requires no instance data attributes, so the request sends an empty attributes array.
+setup_vault_instance() {
+  local _resp _list _existing iface_uuid
+
+  _list=$(list_paginated /v1/vaults/list)
+  _existing=$(find_named_item "$_list" "$VAULT_INSTANCE_NAME")
+  if [[ -n "$_existing" ]]; then
+    VAULT_INSTANCE_UUID=$(echo "$_existing" | jq -r '.uuid')
+    ok "reusing existing vault instance '${VAULT_INSTANCE_NAME}'  $VAULT_INSTANCE_UUID"
+    return 0
+  fi
+
+  iface_uuid=$(connector_interface_uuid "$VAULT_CONN_UUID" "secret")
+
+  log "Creating vault instance '${VAULT_INSTANCE_NAME}'..."
+  _resp=$(ilm_curl POST /v1/vaults -d \
+    "$(jq -n \
+      --arg name      "$VAULT_INSTANCE_NAME" \
+      --arg connUuid  "$VAULT_CONN_UUID" \
+      --arg ifaceUuid "$iface_uuid" \
+      '{connectorUuid: $connUuid, interfaceUuid: $ifaceUuid, name: $name,
+        attributes: [], customAttributes: []}')")
+  VAULT_INSTANCE_UUID=$(require_uuid "$_resp" "vault instance '${VAULT_INSTANCE_NAME}'")
+  ok "vault instance  $VAULT_INSTANCE_UUID"
+}
+
+# connector_interface_uuid <connector_uuid> <interface_code>
+connector_interface_uuid() {
+  local connector_uuid="$1" code="$2" iface
+  iface=$(list_paginated /v2/connectors/list | jq -r --arg u "$connector_uuid" --arg c "$code" \
+    'first(.[] | select(.uuid==$u) | .interfaces[] | select(.code==$c) | .uuid) // empty')
+  [[ -z "$iface" ]] && die "Connector ${connector_uuid} exposes no '${code}' interface"
+  echo "$iface"
+}
+
+# --- Step 5: Vault profile ----------------------------------------------------
+# Created under the (reused) vault instance; backs the TSP profiles' Basic credentials and token's user PIN.
+# The connector requires no profile data attributes, so the request sends an empty attributes array.
+setup_vault_profile() {
+  local _resp _existing _list
+
+  _list=$(list_paginated /v1/vaultProfiles/list)
+  _existing=$(find_named_item "$_list" "$VAULT_PROFILE_NAME")
+  if [[ -n "$_existing" ]]; then
+    VAULT_PROFILE_UUID=$(echo "$_existing" | jq -r '.uuid')
+    if [[ "$(echo "$_existing" | jq -r '.enabled // false')" != "true" ]]; then
+      ilm_curl PATCH "/v1/vaults/${VAULT_INSTANCE_UUID}/vaultProfiles/${VAULT_PROFILE_UUID}/enable" >/dev/null
+    fi
+    ok "reusing existing vault profile '${VAULT_PROFILE_NAME}'  $VAULT_PROFILE_UUID"
+    return 0
+  fi
+
+  log "Creating vault profile '${VAULT_PROFILE_NAME}'..."
+  _resp=$(ilm_curl POST "/v1/vaults/${VAULT_INSTANCE_UUID}/vaultProfiles" -d \
+    "$(jq -n --arg name "$VAULT_PROFILE_NAME" \
+      '{name: $name, description: "", attributes: [], customAttributes: []}')")
+  VAULT_PROFILE_UUID=$(require_uuid "$_resp" "vault profile '${VAULT_PROFILE_NAME}'")
+  ok "vault profile  $VAULT_PROFILE_UUID"
+
+  log "Enabling vault profile..."
+  ilm_curl PATCH "/v1/vaults/${VAULT_INSTANCE_UUID}/vaultProfiles/${VAULT_PROFILE_UUID}/enable" >/dev/null
+  ok "vault profile enabled"
+}
+
+# --- Step 6: Token ------------------------------------------------------------
+# A token is reused by name only when it lives on the --crypto-provider connector.
 setup_token() {
-  local _resp token_attr_defs tok_action_uuid tok_name_uuid tok_code_uuid _existing
-  local opts_uuid create_attrs options_attr_json load_group_uuid _list
+  local _resp _existing _list token_attrs kind=""
 
   _list=$(ilm_curl GET /v1/tokens)
   _existing=$(find_named_item "$_list" "$TOKEN_NAME")
   if [[ -n "$_existing" ]]; then
     TOKEN_UUID=$(echo "$_existing" | jq -r '.uuid')
+    [[ "$(echo "$_existing" | jq -r '.connectorUuid // empty')" != "$CRYPTO_CONN_UUID" ]] && die \
+      "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) lives on connector '$(echo "$_existing" | jq -r '.connectorName // "unknown"')', not on '${CRYPTO_CONN_NAME}'; pass the --crypto-provider it was created on, or choose fresh object names (--token-name, --token-profile-name, --key-name, --ra-profile-name, --tsp-profile-name, --signing-profile-name) and re-run"
     ok "reusing existing token '${TOKEN_NAME}'  $TOKEN_UUID"
     return 0
   fi
 
-  log "Fetching SOFT token attribute definitions..."
-  token_attr_defs=$(ilm_curl GET \
-    "/v1/connectors/${CRYPTO_CONN_UUID}/attributes/cryptographyProvider/SOFT")
+  case "$CRYPTO_PROVIDER" in
+    software-v1) token_attrs=$(software_token_attributes); kind="SOFT" ;;
+    software-v2) token_attrs=$(software_token_attributes) ;;
+    pkcs11)      setup_pin_secret; token_attrs=$(pkcs11_token_attributes) ;;
+  esac
 
-  # The SOFT crypto connector returns two different attribute schemas depending on whether it already has any token
-  # instances:
-  #   - empty connector  -> data_createTokenAction/newTokenName/tokenCode at top level
-  #   - has token(s)     -> a 'data_options' selector whose 'group_loadToken' callback (option=new) yields the real create attributes
-  # This script may run against either state, so it must handle both.
-  opts_uuid=$(echo "$token_attr_defs" | jq -r \
-    'first(.[] | select(.name=="data_options" and .type=="data") | .uuid) // empty')
-
-  if [[ -n "$opts_uuid" ]]; then
-    load_group_uuid=$(group_uuid "$token_attr_defs" "group_loadToken")
-    log "Resolving 'new token' attributes via connector callback..."
-    create_attrs=$(ilm_curl POST \
-      "/v1/connectors/${CRYPTO_CONN_UUID}/cryptographyProvider/SOFT/callback" -d \
-      "$(jq -n --arg uuid "$load_group_uuid" \
-        '{uuid:$uuid,name:"group_loadToken",pathVariable:{option:"new"},requestParameter:{},body:{}}')")
-    options_attr_json=$(jq -nc --arg optsUuid "$opts_uuid" \
-      '{name:"data_options",content:[{reference:"Create new Token",data:"new"}],contentType:"string",uuid:$optsUuid,version:"v2"}')
-  else
-    create_attrs="$token_attr_defs"
-    options_attr_json=""
-  fi
-  tok_action_uuid=$(attr_uuid "$create_attrs" "data_createTokenAction" "string")
-  tok_name_uuid=$(attr_uuid   "$create_attrs" "data_newTokenName"      "string")
-  tok_code_uuid=$(attr_uuid   "$create_attrs" "data_tokenCode"         "secret")
-
-  log "Creating soft token '${TOKEN_NAME}'..."
+  log "Creating token '${TOKEN_NAME}' on ${CRYPTO_CONN_NAME}..."
   _resp=$(ilm_curl POST /v1/tokens -d \
     "$(jq -n \
-      --arg name          "$TOKEN_NAME" \
-      --arg connUuid      "$CRYPTO_CONN_UUID" \
-      --arg pin           "$TOKEN_PASSWORD" \
-      --arg tokActionUuid "$tok_action_uuid" \
-      --arg tokNameUuid   "$tok_name_uuid" \
-      --arg tokCodeUuid   "$tok_code_uuid" \
-      --argjson optionsAttr "${options_attr_json:-null}" \
-      '{
-        name: $name,
-        connectorUuid: $connUuid,
-        kind: "SOFT",
-        attributes: (
-          [
-            {name: "data_createTokenAction", content: [{reference: "new", data: "new"}], contentType: "string", uuid: $tokActionUuid, version: "v2"},
-            {name: "data_newTokenName",      content: [{data: $name}],                   contentType: "string", uuid: $tokNameUuid,   version: "v2"},
-            {name: "data_tokenCode",         content: [{data: {secret: $pin}}],          contentType: "secret", uuid: $tokCodeUuid,   version: "v2"}
-          ]
-          + (if $optionsAttr == null then [] else [$optionsAttr] end)
-        ),
-        customAttributes: []
-      }')")
-  TOKEN_UUID=$(require_uuid "$_resp" "soft token '${TOKEN_NAME}'")
+      --arg name     "$TOKEN_NAME" \
+      --arg connUuid "$CRYPTO_CONN_UUID" \
+      --arg kind     "$kind" \
+      --argjson attributes "$token_attrs" \
+      '{name: $name, connectorUuid: $connUuid, attributes: $attributes, customAttributes: []}
+       + (if $kind == "" then {} else {kind: $kind} end)')")
+  TOKEN_UUID=$(require_uuid "$_resp" "token '${TOKEN_NAME}'")
   ok "token  $TOKEN_UUID"
 }
 
-# --- Step 5: Token profile ----------------------------------------------------
+# The software provider serves one token form on both registrations. It returns two different
+# attribute schemas depending on whether it already has any token instances:
+#   - empty connector  -> data_createTokenAction/newTokenName/tokenCode at top level
+#   - has token(s)     -> a 'data_options' selector whose 'group_loadToken' callback (option=new) yields the real create attributes
+# This script may run against either state, so it must handle both.
+software_token_attributes() {
+  local token_attr_defs form_path callback_path load_group_uuid create_attrs options_attr=""
+  local action_attr name_attr code_attr
+
+  if [[ "$CRYPTO_PROVIDER" == "software-v1" ]]; then
+    form_path="/v1/connectors/${CRYPTO_CONN_UUID}/attributes/cryptographyProvider/SOFT"
+    callback_path="/v1/connectors/${CRYPTO_CONN_UUID}/cryptographyProvider/SOFT/callback"
+  else
+    form_path="/v1/tokens/${CRYPTO_CONN_UUID}/attributes"
+    callback_path="/v2/connectors/${CRYPTO_CONN_UUID}/callback"
+  fi
+
+  log "Fetching software provider token attribute definitions..."
+  token_attr_defs=$(ilm_curl GET "$form_path")
+
+  if [[ -n "$(echo "$token_attr_defs" | jq -r 'first(.[] | select(.name=="data_options" and .type=="data") | .uuid) // empty')" ]]; then
+    load_group_uuid=$(group_uuid "$token_attr_defs" "group_loadToken")
+    log "Resolving 'new token' attributes via connector callback..."
+    create_attrs=$(ilm_curl POST "$callback_path" -d \
+      "$(jq -n --arg uuid "$load_group_uuid" \
+        '{uuid:$uuid,name:"group_loadToken",pathVariable:{option:"new"},requestParameter:{},body:{}}')")
+    options_attr=$(chosen_attribute "$token_attr_defs" "data_options" "new")
+  else
+    create_attrs="$token_attr_defs"
+  fi
+
+  action_attr=$(request_attribute "$create_attrs" "data_createTokenAction" '[{"reference":"new","data":"new"}]')
+  # The connector names a keystore with letters, digits and underscores only.
+  name_attr=$(request_attribute "$create_attrs" "data_newTokenName" \
+    "$(jq -nc --arg name "${TOKEN_NAME//-/_}" '[{data: $name}]')")
+  code_attr=$(request_attribute "$create_attrs" "data_tokenCode" \
+    "$(jq -nc --arg code "$TOKEN_PASSWORD" '[{data: {secret: $code}}]')")
+  jq -nc --argjson action "$action_attr" --argjson name "$name_attr" --argjson code "$code_attr" \
+    --arg options "$options_attr" \
+    '[$action, $name, $code] + (if $options == "" then [] else [$options | fromjson] end)'
+}
+
+# percent_decode TEXT
+percent_decode() {
+  local text="${1//\\/\\\\}"
+  printf '%b' "${text//%/\\x}"
+}
+
+# pkcs11_uri_token_label URI
+pkcs11_uri_token_label() {
+  percent_decode "$(jq -rn --arg uri "$1" \
+    '$uri | ltrimstr("pkcs11:") | split("?")[0] | split(";")[] | select(startswith("token=")) | ltrimstr("token=")')"
+}
+
+# A pkcs11 token is addressed by its config profile (ref proxy sidecar), and PKCS#11 URI of a token.
+pkcs11_token_attributes() {
+  local token_attr_defs profile_attr token_attr_uuid iface_uuid offered item matches token_attr pin_attr
+
+  log "Fetching pkcs11 token attribute definitions..."
+  token_attr_defs=$(ilm_curl GET "/v1/tokens/${CRYPTO_CONN_UUID}/attributes")
+  profile_attr=$(chosen_attribute "$token_attr_defs" "profile" "$PKCS11_PROFILE")
+  token_attr_uuid=$(attr_uuid "$token_attr_defs" "token" "string")
+  iface_uuid=$(connector_interface_uuid "$CRYPTO_CONN_UUID" "cryptography")
+
+  log "Listing the tokens of profile '${PKCS11_PROFILE}' via connector callback..."
+  offered=$(ilm_curl POST "/v2/connectors/${CRYPTO_CONN_UUID}/callback" -d \
+    "$(jq -nc --arg uuid "$token_attr_uuid" --arg iface "$iface_uuid" --argjson profile "$profile_attr" \
+      '{name: "token", uuid: $uuid, interfaceUuid: $iface, attributes: [$profile]}')")
+  matches="[]"
+  while IFS= read -r item; do
+    if [[ "$(pkcs11_uri_token_label "$(echo "$item" | jq -r '.data')")" == "$PKCS11_TOKEN" ]]; then
+      matches=$(echo "$matches" | jq -c --argjson item "$item" '. + [$item]')
+    fi
+  done < <(echo "$offered" | jq -c '.[]')
+  case "$(echo "$matches" | jq 'length')" in
+    1) ;;
+    0) die "Profile '${PKCS11_PROFILE}' offers no token labelled '${PKCS11_TOKEN}'. Offered: $(echo "$offered" | jq -c '[.[].data]')" ;;
+    *) die "Profile '${PKCS11_PROFILE}' offers more than one token labelled '${PKCS11_TOKEN}': $(echo "$matches" | jq -c '[.[].data]')" ;;
+  esac
+
+  token_attr=$(request_attribute "$token_attr_defs" "token" "$(echo "$matches" | jq -c '[.[0] | {data, reference}]')")
+  pin_attr=$(request_attribute "$token_attr_defs" "pin" \
+    "$(jq -nc --arg uuid "$PIN_SECRET_UUID" --arg name "$PIN_SECRET_NAME" \
+      '[{data: {resource: "secrets", uuid: $uuid, name: $name}}]')")
+  jq -nc --argjson profile "$profile_attr" --argjson token "$token_attr" --argjson pin "$pin_attr" \
+    '[$profile, $token, $pin]'
+}
+
+setup_pin_secret() {
+  local _list _existing _resp attempt state="" enabled=""
+  PIN_SECRET_NAME="${TOKEN_NAME}-pin"
+
+  _list=$(list_paginated /v1/secrets)
+  _existing=$(find_named_item "$_list" "$PIN_SECRET_NAME")
+  if [[ -n "$_existing" ]]; then
+    PIN_SECRET_UUID=$(echo "$_existing" | jq -r '.uuid')
+    ok "reusing existing secret '${PIN_SECRET_NAME}'  $PIN_SECRET_UUID"
+  else
+    [[ -z "${!PIN_ENV:-}" ]] && die \
+      "Environment variable ${PIN_ENV} holds no token user PIN; export it, or name another with --pin-env, to create secret '${PIN_SECRET_NAME}'"
+    log "Creating secret '${PIN_SECRET_NAME}' holding the token user PIN from ${PIN_ENV}..."
+    _resp=$(jq -n --arg name "$PIN_SECRET_NAME" --arg pinEnv "$PIN_ENV" \
+        '{name: $name, description: "PKCS#11 token user PIN",
+          secret: {type: "generic", content: $ENV[$pinEnv]}, attributes: [], customAttributes: []}' \
+      | ilm_curl POST "/v1/vaults/${VAULT_INSTANCE_UUID}/vaultProfiles/${VAULT_PROFILE_UUID}/secrets" --data-binary @-)
+    PIN_SECRET_UUID=$(require_uuid "$_resp" "secret '${PIN_SECRET_NAME}'")
+    ok "secret  $PIN_SECRET_UUID"
+  fi
+
+  for (( attempt=1; attempt<=15; attempt++ )); do
+    state=$(ilm_curl GET "/v1/secrets/${PIN_SECRET_UUID}" | jq -r '.state // empty')
+    [[ "$state" == "active" ]] && break
+    sleep 1
+  done
+  [[ "$state" != "active" ]] && die "Secret '${PIN_SECRET_NAME}' did not become active (last state: '${state}')"
+  for (( attempt=1; attempt<=15; attempt++ )); do
+    enabled=$(ilm_curl GET "/v1/secrets/${PIN_SECRET_UUID}" | jq -r '.enabled // false')
+    [[ "$enabled" == "true" ]] && { ok "secret enabled"; return 0; }
+    ilm_curl PATCH "/v1/secrets/${PIN_SECRET_UUID}/enable" >/dev/null
+    sleep 1
+  done
+  die "Secret '${PIN_SECRET_NAME}' did not stay enabled"
+}
+
+# --- Step 7: Token profile ----------------------------------------------------
 setup_token_profile() {
   local _resp _existing _list
 
@@ -890,6 +1142,8 @@ setup_token_profile() {
   _existing=$(find_named_item "$_list" "$TOKEN_PROFILE_NAME")
   if [[ -n "$_existing" ]]; then
     TOKEN_PROFILE_UUID=$(echo "$_existing" | jq -r '.uuid')
+    [[ "$(echo "$_existing" | jq -r '.tokenInstanceUuid // empty')" != "$TOKEN_UUID" ]] && die \
+      "Existing token profile '${TOKEN_PROFILE_NAME}' (${TOKEN_PROFILE_UUID}) belongs to token '$(echo "$_existing" | jq -r '.tokenInstanceName // "unknown"')', not to '${TOKEN_NAME}'; choose a fresh --token-profile-name and re-run"
     if [[ "$(echo "$_existing" | jq -r '.enabled // false')" != "true" ]]; then
       ilm_curl PATCH "/v1/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/enable" >/dev/null
     fi
@@ -911,7 +1165,7 @@ setup_token_profile() {
   ok "token profile enabled"
 }
 
-# --- Step 6: Time Quality configuration ---------------------------------------
+# --- Step 8: Time Quality configuration ---------------------------------------
 # record_time_quality_settings <configuration_detail_json>
 record_time_quality_settings() {
   TIME_QUALITY_EFFECTIVE_ACCURACY=$(echo "$1"                  | jq -r 'if .accuracy               == null then empty else .accuracy               end')
@@ -969,75 +1223,6 @@ setup_time_quality_config() {
   TIME_QUALITY_UUID=$(require_uuid "$_resp" "Time Quality configuration '${TIME_QUALITY_CONFIG_NAME}'")
   record_time_quality_settings "$_resp"
   ok "Time Quality configuration  $TIME_QUALITY_UUID"
-}
-
-# --- Step 7: Vault instance ---------------------------------------------------
-# Created (or reused) under the credential-provider v2 connector, bound to its `secret` interface.
-# The connector requires no instance data attributes, so the request sends an empty attributes array.
-setup_vault_instance() {
-  local _resp _list _existing iface_uuid
-
-  _list=$(list_paginated /v1/vaults/list)
-  _existing=$(find_named_item "$_list" "$VAULT_INSTANCE_NAME")
-  if [[ -n "$_existing" ]]; then
-    VAULT_INSTANCE_UUID=$(echo "$_existing" | jq -r '.uuid')
-    ok "reusing existing vault instance '${VAULT_INSTANCE_NAME}'  $VAULT_INSTANCE_UUID"
-    return 0
-  fi
-
-  iface_uuid=$(vault_secret_interface_uuid)
-
-  log "Creating vault instance '${VAULT_INSTANCE_NAME}'..."
-  _resp=$(ilm_curl POST /v1/vaults -d \
-    "$(jq -n \
-      --arg name      "$VAULT_INSTANCE_NAME" \
-      --arg connUuid  "$VAULT_CONN_UUID" \
-      --arg ifaceUuid "$iface_uuid" \
-      '{connectorUuid: $connUuid, interfaceUuid: $ifaceUuid, name: $name,
-        attributes: [], customAttributes: []}')")
-  VAULT_INSTANCE_UUID=$(require_uuid "$_resp" "vault instance '${VAULT_INSTANCE_NAME}'")
-  ok "vault instance  $VAULT_INSTANCE_UUID"
-}
-
-# vault_secret_interface_uuid -- uuid of the vault connector's `secret` interface (needed as
-# interfaceUuid when creating a vault instance).
-vault_secret_interface_uuid() {
-  local connectors iface
-  connectors=$(ilm_curl POST /v2/connectors/list -d \
-    '{"itemsPerPage":1000,"pageNumber":1,"filters":[]}' | jq '.items // []')
-  iface=$(echo "$connectors" | jq -r --arg u "$VAULT_CONN_UUID" \
-    'first(.[] | select(.uuid==$u) | .interfaces[] | select(.code=="secret") | .uuid) // empty')
-  [[ -z "$iface" ]] && die "Vault connector ${VAULT_CONN_UUID} exposes no 'secret' interface"
-  echo "$iface"
-}
-
-# --- Step 8: Vault profile ----------------------------------------------------
-# Created under the (reused) vault instance; backs the TSP profiles' Basic credentials.
-# The connector requires no profile data attributes, so the request sends an empty attributes array.
-setup_vault_profile() {
-  local _resp _existing _list
-
-  _list=$(list_paginated /v1/vaultProfiles/list)
-  _existing=$(find_named_item "$_list" "$VAULT_PROFILE_NAME")
-  if [[ -n "$_existing" ]]; then
-    VAULT_PROFILE_UUID=$(echo "$_existing" | jq -r '.uuid')
-    if [[ "$(echo "$_existing" | jq -r '.enabled // false')" != "true" ]]; then
-      ilm_curl PATCH "/v1/vaults/${VAULT_INSTANCE_UUID}/vaultProfiles/${VAULT_PROFILE_UUID}/enable" >/dev/null
-    fi
-    ok "reusing existing vault profile '${VAULT_PROFILE_NAME}'  $VAULT_PROFILE_UUID"
-    return 0
-  fi
-
-  log "Creating vault profile '${VAULT_PROFILE_NAME}'..."
-  _resp=$(ilm_curl POST "/v1/vaults/${VAULT_INSTANCE_UUID}/vaultProfiles" -d \
-    "$(jq -n --arg name "$VAULT_PROFILE_NAME" \
-      '{name: $name, description: "", attributes: [], customAttributes: []}')")
-  VAULT_PROFILE_UUID=$(require_uuid "$_resp" "vault profile '${VAULT_PROFILE_NAME}'")
-  ok "vault profile  $VAULT_PROFILE_UUID"
-
-  log "Enabling vault profile..."
-  ilm_curl PATCH "/v1/vaults/${VAULT_INSTANCE_UUID}/vaultProfiles/${VAULT_PROFILE_UUID}/enable" >/dev/null
-  ok "vault profile enabled"
 }
 
 # --- Step 9: Mapped user ------------------------------------------------------
@@ -1119,55 +1304,76 @@ key_algorithm_code() {
   esac
 }
 
-# An existing key is matched by name alone, so a rerun that changes --key-algorithm would
-# otherwise reuse the old material and report the requested algorithm over it.
+MLDSA65_PUBLIC_KEY_BITS=15616 # 1952 bytes
+
+# An existing key is matched by name alone, so a rerun that changes --key-algorithm or
+# --crypto-provider would otherwise reuse the old material and report the requested algorithm over it.
 # Usage: require_key_spec <key_details_json> <key_name> <key_uuid>
 require_key_spec() {
-  local key_details="$1" key_name="$2" key_uuid="$3" want actual spec want_spec
+  local key_details="$1" key_name="$2" key_uuid="$3" want actual spec want_spec length prehash
   local hint="choose fresh object names (--key-name, --ra-profile-name, --tsp-profile-name, --signing-profile-name) and re-run"
+  [[ "$(echo "$key_details" | jq -r '.tokenInstanceUuid // empty')" != "$TOKEN_UUID" ]] \
+    && die "Existing key '${key_name}' (${key_uuid}) lives on token '$(echo "$key_details" | jq -r '.tokenInstanceName // "unknown"')', not on '${TOKEN_NAME}'; ${hint}"
   want=$(key_algorithm_code)
   actual=$(echo "$key_details" | jq -r 'first(.items[]?.keyAlgorithm) // empty')
   [[ "$actual" != "$want" ]] \
     && die "Existing key '${key_name}' (${key_uuid}) is ${actual:-of an unknown algorithm}, but --key-algorithm asks for ${want}; ${hint}"
 
   if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
-    spec=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Private") | .keyData | fromjson?
-      | "ML-DSA level \(.level), prehash \(.prehash)") // empty')
-    want_spec="ML-DSA level 3, prehash false"
-  else
-    spec=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Public") | "RSA \(.length) bits") // empty')
-    want_spec="RSA 2048 bits"
+    length=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Public") | .length) // empty')
+    [[ "$length" != "$MLDSA65_PUBLIC_KEY_BITS" ]] \
+      && die "Existing key '${key_name}' (${key_uuid}) has a ${length:-?}-bit ML-DSA public key, but --key-algorithm MLDSA provisions ML-DSA-65, whose public key has ${MLDSA65_PUBLIC_KEY_BITS} bits; ${hint}"
+    # Only the v1 software provider records a prehash flag, in the private key item.
+    if [[ "$CRYPTO_PROVIDER" == "software-v1" ]]; then
+      prehash=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Private") | .keyData | fromjson? | objects | .prehash | select(. != null) | tostring) // empty')
+      [[ "$prehash" != "false" ]] \
+        && die "Existing key '${key_name}' (${key_uuid}) records prehash=${prehash:-nothing}, but --key-algorithm MLDSA provisions pure ML-DSA-65; ${hint}"
+    fi
+    return 0
   fi
+  spec=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Public") | "RSA \(.length) bits") // empty')
+  want_spec="RSA 2048 bits"
   [[ "$spec" == "$want_spec" ]] && return 0
   die "Existing key '${key_name}' (${key_uuid}) is ${spec:-of an unknown key spec}, but --key-algorithm ${KEY_ALGORITHM} provisions ${want_spec}; ${hint}"
 }
 
 # Usage: signing_operation_attributes <attrs_json>
 signing_operation_attributes() {
-  local attrs="$1" sig_scheme_uuid sig_digest_uuid
+  local attrs="$1" sig_scheme sig_digest
 
   if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
     echo '[]'
     return 0
   fi
 
-  sig_scheme_uuid=$(attr_uuid "$attrs" "data_rsaSigScheme" "string")
-  sig_digest_uuid=$(attr_uuid "$attrs" "data_sigDigest"    "string")
-  jq -n --arg sigSchemeUuid "$sig_scheme_uuid" --arg sigDigestUuid "$sig_digest_uuid" \
-    '[
-      {name: "data_rsaSigScheme", content: [{data: "PKCS1-v1_5", reference: "PKCS#1 v1.5"}],
-       contentType: "string", uuid: $sigSchemeUuid, version: "v2"},
-      {name: "data_sigDigest", content: [{data: "SHA-384", reference: "SHA-384"}],
-       contentType: "string", uuid: $sigDigestUuid, version: "v2"}
-    ]'
+  sig_scheme=$(chosen_attribute "$attrs" "data_rsaSigScheme" "PKCS1-v1_5")
+  sig_digest=$(chosen_attribute "$attrs" "data_sigDigest"    "SHA-384")
+  jq -nc --argjson scheme "$sig_scheme" --argjson digest "$sig_digest" '[$scheme, $digest]'
+}
+
+# The key spec is a group the connector resolves once the algorithm is chosen.
+# Usage: key_spec_definitions <keypair_attr_defs> <algorithm_code> <key_alg_attr_json>
+key_spec_definitions() {
+  local keypair_attr_defs="$1" algorithm_code="$2" key_alg_attr="$3" key_spec_group_uuid
+  key_spec_group_uuid=$(group_uuid "$keypair_attr_defs" "$KEY_SPEC_GROUP")
+  if [[ "$CRYPTO_PROVIDER" == "software-v1" ]]; then
+    ilm_curl POST "/v1/keys/${TOKEN_PROFILE_UUID}/callback" -d \
+      "$(jq -n --arg uuid "$key_spec_group_uuid" --arg name "$KEY_SPEC_GROUP" --arg algorithm "$algorithm_code" \
+        '{"uuid":$uuid,"name":$name,"pathVariable":{"algorithm":$algorithm},
+          "requestParameter":{},"body":{},"filter":{}}')"
+  else
+    ilm_curl POST "/v1/keys/${TOKEN_PROFILE_UUID}/callback" -d \
+      "$(jq -n --arg uuid "$key_spec_group_uuid" --arg name "$KEY_SPEC_GROUP" --argjson algorithm "$key_alg_attr" \
+        '{uuid: $uuid, name: $name, attributes: [$algorithm]}')"
+  fi
 }
 
 # Usage: setup_key_pair <key_name> <out_key_uuid_var> <out_priv_item_uuid_var>
 setup_key_pair() {
   local key_name="$1" out_key_uuid="$2" out_priv_item_uuid="$3"
-  local _resp keypair_attr_defs key_alias_uuid key_alg_uuid key_spec_group_uuid
-  local key_spec_attrs rsa_key_size_uuid key_details _key_uuid _priv_uuid _existing _list
-  local algorithm_code key_spec_json mldsa_level_uuid mldsa_prehash_uuid
+  local _resp keypair_attr_defs key_alias_attr key_alg_attr
+  local key_spec_attrs rsa_key_size_attr key_details _key_uuid _priv_uuid _existing _list
+  local algorithm_code key_spec_json mldsa_level_attr mldsa_prehash_attr
 
   _list=$(ilm_curl GET /v1/keys/pairs)
   _existing=$(find_named_item "$_list" "$key_name")
@@ -1188,37 +1394,25 @@ setup_key_pair() {
   log "Fetching key pair attribute definitions..."
   keypair_attr_defs=$(ilm_curl GET \
     "/v1/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/keyPair/attributes")
-  key_alias_uuid=$(attr_uuid       "$keypair_attr_defs" "data_keyAlias"     "string")
-  key_alg_uuid=$(attr_uuid         "$keypair_attr_defs" "data_keyAlgorithm" "string")
-  key_spec_group_uuid=$(group_uuid "$keypair_attr_defs" "group_keySpec")
-
   algorithm_code=$(key_algorithm_code)
+  key_alg_attr=$(chosen_attribute "$keypair_attr_defs" "$KEY_ALGORITHM_ATTR" "$algorithm_code")
+  key_alias_attr=$(request_attribute "$keypair_attr_defs" "$KEY_ALIAS_ATTR" \
+    "$(jq -nc --arg name "$key_name" '[{data: $name}]')")
+
   log "Fetching ${algorithm_code} key-spec attributes via callback..."
-  key_spec_attrs=$(ilm_curl POST "/v1/keys/${TOKEN_PROFILE_UUID}/callback" -d \
-    "$(jq -n --arg uuid "$key_spec_group_uuid" --arg algorithm "$algorithm_code" \
-      '{"uuid":$uuid,"name":"group_keySpec","pathVariable":{"algorithm":$algorithm},
-        "requestParameter":{},"body":{},"filter":{}}')")
+  key_spec_attrs=$(key_spec_definitions "$keypair_attr_defs" "$algorithm_code" "$key_alg_attr")
 
   if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
-    mldsa_level_uuid=$(attr_uuid   "$key_spec_attrs" "data_mldsaLevel"   "integer")
-    mldsa_prehash_uuid=$(attr_uuid "$key_spec_attrs" "data_mldsaPrehash" "boolean")
-    key_spec_json=$(jq -n \
-      --arg levelUuid   "$mldsa_level_uuid" \
-      --arg prehashUuid "$mldsa_prehash_uuid" \
-      '[
-        {name: "data_mldsaLevel", content: [{data: 3, reference: "MLDSA_65"}],
-         contentType: "integer", uuid: $levelUuid, version: "v2"},
-        {name: "data_mldsaPrehash", content: [{data: false}],
-         contentType: "boolean", uuid: $prehashUuid, version: "v2"}
-      ]')
+    mldsa_level_attr=$(chosen_attribute "$key_spec_attrs" "$MLDSA_LEVEL_ATTR" 3)
+    key_spec_json=$(jq -nc --argjson level "$mldsa_level_attr" '[$level]')
+    if [[ -n "$MLDSA_PREHASH_ATTR" ]]; then
+      mldsa_prehash_attr=$(chosen_attribute "$key_spec_attrs" "$MLDSA_PREHASH_ATTR" false)
+      key_spec_json=$(jq -nc --argjson spec "$key_spec_json" --argjson prehash "$mldsa_prehash_attr" '$spec + [$prehash]')
+    fi
     log "Creating ML-DSA-65 key pair '${key_name}'..."
   else
-    rsa_key_size_uuid=$(attr_uuid "$key_spec_attrs" "data_rsaKeySize" "integer")
-    key_spec_json=$(jq -n --arg rsaKeySizeUuid "$rsa_key_size_uuid" \
-      '[
-        {name: "data_rsaKeySize", content: [{data: 2048, reference: "RSA_2048"}],
-         contentType: "integer", uuid: $rsaKeySizeUuid, version: "v2"}
-      ]')
+    rsa_key_size_attr=$(chosen_attribute "$key_spec_attrs" "$RSA_KEY_SIZE_ATTR" 2048)
+    key_spec_json=$(jq -nc --argjson size "$rsa_key_size_attr" '[$size]')
     log "Creating RSA 2048 key pair '${key_name}'..."
   fi
 
@@ -1226,30 +1420,14 @@ setup_key_pair() {
     "/v1/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/keyPair" -d \
     "$(jq -n \
       --arg name            "$key_name" \
-      --arg keyAliasUuid    "$key_alias_uuid" \
-      --arg keyAlgUuid      "$key_alg_uuid" \
-      --arg algorithmCode   "$algorithm_code" \
+      --argjson keyAlias    "$key_alias_attr" \
+      --argjson keyAlg      "$key_alg_attr" \
       --argjson keySpec     "$key_spec_json" \
       '{
         groupUuids: [],
         name: $name,
         description: "",
-        attributes: ([
-          {
-            name: "data_keyAlias",
-            content: [{data: $name}],
-            contentType: "string",
-            uuid: $keyAliasUuid,
-            version: "v2"
-          },
-          {
-            name: "data_keyAlgorithm",
-            content: [{data: $algorithmCode, reference: $algorithmCode}],
-            contentType: "string",
-            uuid: $keyAlgUuid,
-            version: "v2"
-          }
-        ] + $keySpec),
+        attributes: ([$keyAlias, $keyAlg] + $keySpec),
         customAttributes: []
       }')")
   _key_uuid=$(require_uuid "$_resp" "${algorithm_code} key pair '${key_name}'")
@@ -1434,16 +1612,15 @@ setup_ra_profile() {
 # Usage: issue_certificate <cn> <key_uuid> <priv_item_uuid> <ra_profile_uuid> <out_cert_uuid_var>
 issue_certificate() {
   local cn="$1" key_uuid="$2" priv_item_uuid="$3" ra_profile_uuid="$4" out_cert_uuid="$5"
-  local _resp csr_attrs cn_uuid sig_attrs signature_attrs algorithm_code _cert_uuid
+  local _resp csr_attrs cn_uuid sig_attrs signature_attrs _cert_uuid
 
   log "Fetching CSR attribute definitions..."
   csr_attrs=$(ilm_curl GET "/v1/certificates/csr/attributes")
   cn_uuid=$(attr_uuid "$csr_attrs" "commonName" "string")
 
-  algorithm_code=$(key_algorithm_code)
-  log "Fetching signature attribute definitions (${algorithm_code})..."
+  log "Fetching signature attribute definitions..."
   sig_attrs=$(ilm_curl GET \
-    "/v1/operations/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/${key_uuid}/items/${priv_item_uuid}/signature/${algorithm_code}/attributes")
+    "/v1/operations/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/${key_uuid}/items/${priv_item_uuid}/sign/attributes")
   signature_attrs=$(signing_operation_attributes "$sig_attrs")
 
   log "Issuing TSA certificate  CN=${cn}..."
@@ -2018,7 +2195,7 @@ Setup complete. Created resources:
   Shared infrastructure:
     connector       $CRED_CONN_NAME                      $CRED_CONN_UUID
     connector       $EJBCA_CONN_NAME                     $EJBCA_CONN_UUID
-    connector       $CRYPTO_CONN_NAME                    $CRYPTO_CONN_UUID
+    connector       $CRYPTO_CONN_NAME                    $CRYPTO_CONN_UUID  (--crypto-provider ${CRYPTO_PROVIDER})
     connector       $TIMESTAMP_FORMATTING_CONN_NAME      $TIMESTAMP_FORMATTING_CONN_UUID
     connector       $VAULT_CONN_NAME                     $VAULT_CONN_UUID
     credential      $CREDENTIAL_NAME                     $CRED_UUID
@@ -2069,6 +2246,7 @@ write_json_summary() {
     --arg ilmHost "$ILM_HOST" \
     --arg connectorHost "$CONNECTOR_HOST" \
     --arg certificateDn "$CERTIFICATE_DN" \
+    --arg cryptoProvider "$CRYPTO_PROVIDER" \
     --arg credConnName "$CRED_CONN_NAME"                    --arg credConnUuid "$CRED_CONN_UUID" \
     --arg ejbcaConnName "$EJBCA_CONN_NAME"                  --arg ejbcaConnUuid "$EJBCA_CONN_UUID" \
     --arg cryptoConnName "$CRYPTO_CONN_NAME"                --arg cryptoConnUuid "$CRYPTO_CONN_UUID" \
@@ -2111,6 +2289,7 @@ write_json_summary() {
       ilmHost: $ilmHost,
       connectorHost: $connectorHost,
       certificateDnPrefix: $certificateDn,
+      cryptoProvider: $cryptoProvider,
       connectors: {
         credentialProvider:  { name: $credConnName,   uuid: $credConnUuid },
         ejbca:               { name: $ejbcaConnName,  uuid: $ejbcaConnUuid },
@@ -2175,11 +2354,11 @@ main() {
   setup_connectors
   setup_credential
   setup_authority
+  setup_vault_instance
+  setup_vault_profile
   setup_token
   setup_token_profile
   setup_time_quality_config
-  setup_vault_instance
-  setup_vault_profile
   setup_mapped_user
   setup_timestamping_role
 
