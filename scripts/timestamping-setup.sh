@@ -1438,8 +1438,8 @@ require_key_spec() {
      | "\(.name)=\(.held), but the run asks for \(.name)=\($req[.name])"] | join("; ")')
   [[ -n "$mismatch" ]] && die "Existing key '${key_name}' (${key_uuid}) holds ${mismatch}; ${hint}"
   held_names=$(echo "$key_details" | jq -c '[(.attributes // [])[].name]')
-  unheld=$(key_spec_names_outside "$held_names")
-  [[ -n "$unheld" ]] && die "Existing key '${key_name}' (${key_uuid}) holds no ${unheld}, which --key-spec names; ${hint}"
+  unheld=$(key_spec_names_outside "$held_names" "$requested")
+  [[ -n "$unheld" ]] && die "Existing key '${key_name}' (${key_uuid}) holds no ${unheld}, which the run asks for; ${hint}"
 
   if [[ "$KEY_ALGORITHM" == "ML-DSA" && "$CRYPTO_PROVIDER" == "software-v1" ]]; then
     require_recorded_prehash "$key_details" "$key_name" "$key_uuid" "$requested" "$hint"
@@ -1516,14 +1516,14 @@ key_spec_pairs() {
 }
 
 key_spec_names_outside() {
-  jq -rn --argjson names "$1" --argjson pairs "$KEY_SPEC_PAIRS" \
+  jq -rn --argjson names "$1" --argjson pairs "$2" \
     '[$pairs | keys[] | select(. as $n | $names | index($n) | not)] | join(", ")'
 }
 
 require_offered_key_spec_names() {
   local names unknown
   names=$(echo "$1" | jq -c '[.[] | select(.type == "data") | .name]') || exit 1
-  unknown=$(key_spec_names_outside "$names") || exit 1
+  unknown=$(key_spec_names_outside "$names" "$KEY_SPEC_PAIRS") || exit 1
   [[ -z "$unknown" ]] && return 0
   die "--key-spec names ${unknown}, which the ${KEY_ALGORITHM} key spec lacks. Offered: ${names}"
 }
