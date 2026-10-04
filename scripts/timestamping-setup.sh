@@ -553,6 +553,9 @@ parse_args() {
 # --- Validation ---------------------------------------------------------------
 validate() {
   local errors=0
+  command -v jq     &>/dev/null || { echo "ERROR: jq is required but not installed";     exit 1; }
+  command -v curl   &>/dev/null || { echo "ERROR: curl is required but not installed";   exit 1; }
+  command -v base64 &>/dev/null || { echo "ERROR: base64 is required but not installed"; exit 1; }
   resolve_object_names
   [[ -z "$PKCS12_BUNDLE" ]] && { echo "ERROR: --pkcs12-bundle is required"; errors=$((errors+1)); }
   [[ -z "$CERTIFICATE_CN_PREFIX" ]] && { echo "ERROR: --certificate-dn or --set-name is required"; errors=$((errors+1)); }
@@ -586,10 +589,6 @@ validate() {
     [[ ! -f "$ISSUER_CA_FILE" ]] && { echo "ERROR: --issuer-ca file not found: $ISSUER_CA_FILE"; exit 1; }
     command -v openssl &>/dev/null || { echo "ERROR: openssl is required for --issuer-ca"; exit 1; }
   fi
-
-  command -v jq     &>/dev/null || { echo "ERROR: jq is required but not installed";     exit 1; }
-  command -v curl   &>/dev/null || { echo "ERROR: curl is required but not installed";   exit 1; }
-  command -v base64 &>/dev/null || { echo "ERROR: base64 is required but not installed"; exit 1; }
 
   [[ -z "$TOKEN_PASSWORD" ]] && TOKEN_PASSWORD="$PKCS12_PASSWORD"
 
