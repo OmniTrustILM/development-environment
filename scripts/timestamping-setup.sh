@@ -278,7 +278,7 @@ EJBCA options:
   --ejbca-cert-profile NAME   Certificate profile (non-qualified)(default: DemoTSAEECertificateProfile)
   --ejbca-cert-profile-qualified NAME
                               Certificate profile (qualified)    (default: DemoTSAQCEECertificateProfile)
-  --issuer-ca FILE            Issuing CA certificate (PEM or DER)
+  --issuer-ca FILE            One root CA certificate (PEM or DER)
 
 Object name bases (suffixes -non-qualified / -qualified are appended automatically):
   --credential-name NAME      (default: ejbca.3key.company)
@@ -1045,8 +1045,8 @@ setup_token() {
   if [[ -n "$_existing" ]]; then
     TOKEN_UUID=$(echo "$_existing" | jq -r '.uuid')
     [[ "$(echo "$_existing" | jq -r '.connectorUuid // empty')" != "$CRYPTO_CONN_UUID" ]] && die \
-      "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) lives on connector '$(echo "$_existing" | jq -r '.connectorName // "unknown"')', not on '${CRYPTO_CONN_NAME}'.\nPass the --crypto-provider it was created on, or ${FRESH_TOKEN_NAMES_HINT}"
-    require_token_held
+      "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) lives on connector '$(echo "$_existing" | jq -r '.connectorName // "unknown"')', not on '${CRYPTO_CONN_NAME}'; pass the --crypto-provider it was created on, or ${FRESH_TOKEN_NAMES_HINT}"
+    require_token_usable
     ok "reusing existing token '${TOKEN_NAME}'  $TOKEN_UUID"
     return 0
   fi
@@ -1070,12 +1070,15 @@ setup_token() {
   ok "token  $TOKEN_UUID"
 }
 
-require_token_held() {
-  local reload
+require_token_usable() {
+  local reload status
   reload=$(ilm_curl PATCH "/v1/tokens/${TOKEN_UUID}") \
     || die "Could not reload existing token '${TOKEN_NAME}' (${TOKEN_UUID}) at connector '${CRYPTO_CONN_NAME}'; start the connector where it is down, else ${FRESH_TOKEN_NAMES_HINT}"
-  [[ "$(echo "$reload" | jq -r '.status.status // empty | ascii_downcase')" == "disconnected" ]] \
-    && die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is disconnected at connector '${CRYPTO_CONN_NAME}'; ${FRESH_TOKEN_NAMES_HINT}"
+  status=$(echo "$reload" | jq -r '.status.status // empty | ascii_downcase')
+  case "$status" in
+    disconnected) die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is disconnected at connector '${CRYPTO_CONN_NAME}'; ${FRESH_TOKEN_NAMES_HINT}" ;;
+    deactivated)  die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is deactivated at connector '${CRYPTO_CONN_NAME}'; activate it in Core, or ${FRESH_TOKEN_NAMES_HINT}" ;;
+  esac
   return 0
 }
 
@@ -1408,7 +1411,7 @@ certificate_fingerprint() {
 # certificate_uuid_by_fingerprint <sha256_hex> -> the uuid of the certificate Core holds under it, or empty.
 certificate_uuid_by_fingerprint() {
   ilm_curl POST /v1/certificates -d "$(jq -nc --arg fingerprint "$1" \
-      '{itemsPerPage: 1, pageNumber: 1,
+      '{itemsPerPage: 1, pageNumber: 1, includeArchived: true,
         filters: [{fieldSource: "property", fieldIdentifier: "FINGERPRINT", condition: "EQUALS", value: $fingerprint}]}')" \
     | jq -r 'first(.certificates[]?.uuid) // empty'
 }
@@ -2558,7 +2561,6 @@ write_json_summary() {
       vaultProfile:  { name: $vaultProfileName, uuid: $vaultProfileUuid },
       mappedUser:    { username: $mappedUserName, uuid: $mappedUserUuid },
       role:          { name: $roleName, uuid: $roleUuid },
-      tspCredential: { username: $basicUser, password: $basicPassword },
       timeQuality: {
         name:                   $tqName, uuid: $tqUuid, accuracy: $tqAccuracy,
         ntpServers:             $tqNtpServers, maxClockDrift: $tqMaxDrift,
@@ -2632,10 +2634,7 @@ main() {
   write_json_summary
 }
 
-read_from_stdin() { (( ${#BASH_SOURCE[@]} == 0 )); }
-
-executed_directly() { read_from_stdin || [[ "${BASH_SOURCE[0]}" == "$0" ]]; }
-
-if executed_directly; then
+# return succeeds only where the script is sourced, so main runs whenever bash executes it.
+if ! (return 0 2>/dev/null); then
   main "$@"
 fi
