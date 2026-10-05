@@ -322,7 +322,7 @@ Certificates that should be trusted by the `auth` service must be added to `trus
 
 ## Scripts
 
-The `scripts/` directory contains helper scripts for one-time setup tasks. They run on the host and need `curl`; `timestamping-setup.sh` additionally requires `jq` and `base64`.
+The `scripts/` directory contains helper scripts for one-time setup tasks. They run on the host and need `curl`.
 
 ### bootstrap-first-admin.sh
 
@@ -359,7 +359,9 @@ The connector services it registers must already be running — start them with 
 
 The `--certificate-dn` value is used directly as the certificates' common name prefix — the issued CNs are `<value>-non-qualified` and `<value>-qualified`, so pass a bare name, not a `CN=` string.
 
-Pass `--json-summary <file>` to additionally write the names and UUIDs of every provisioned object as JSON, for scripts and test suites that would otherwise have to scrape the printed summary. The file contains the TSP Basic credential password, so on POSIX filesystems it is created with owner-only (0600) permissions — keep it out of version control. Some Windows setups do not enforce POSIX modes — Git Bash, and WSL writing to a Windows drive under `/mnt` mounted without the `metadata` option. There `chmod` reports success while the file stays group- and world-readable. (WSL's own Linux filesystem does enforce them normally.) The script therefore checks the mode that actually stuck and warns when it is not 0600 — protect the file yourself when you see that warning.
+`--key-algorithm` and `--key-spec` take the cryptography provider's own algorithm codes and key-spec field names. `--signature-scheme` and `--signature-digest` choose the signature where the key's algorithm leaves it open. `--issuer-ca` uploads a root CA certificate to Core and trusts it. `--set-name` names a set's objects and, in place of `--certificate-dn`, its certificates' CN prefix.
+
+Pass `--json-summary <file>` to additionally write the names and UUIDs of every provisioned object as JSON, for scripts and test suites that would otherwise have to scrape the printed summary. Runs that share the file each add their sets to it. The file contains the TSP Basic credential password, so on POSIX filesystems it is created with owner-only (0600) permissions — keep it out of version control. Some Windows setups do not enforce POSIX modes — Git Bash, and WSL writing to a Windows drive under `/mnt` mounted without the `metadata` option. There `chmod` reports success while the file stays group- and world-readable. (WSL's own Linux filesystem does enforce them normally.) The script therefore checks the mode that actually stuck and warns when it is not 0600 — protect the file yourself when you see that warning.
 
 The flag has one side effect on provisioning. A TSP Basic credential that already exists is normally reused untouched, and the API never returns its stored password. With `--json-summary` the credential is therefore rotated to `--tsp-credential-password` before the summary is written, so the reported password is one that works — which invalidates the password any current consumer of that credential holds. Without the flag no rotation happens.
 

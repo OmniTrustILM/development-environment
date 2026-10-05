@@ -16,23 +16,23 @@
 #   7. Creates a token profile
 #   8. Creates a Time Quality configuration (used by the qualified signing profile)
 #   9. Creates the dedicated mapped user, authenticating with Basic credentials
-#  10. Creates the timestamping role and attaches it to that user (its permissions are granted in step 20)
+#  10. Creates the timestamping role and attaches it to that user (its permissions are granted in step 21)
+#  11. With --issuer-ca: uploads the issuing CA where Core lacks it, then marks it as trusted
 #   For each of two sets (non-qualified / qualified):
-#      11. Creates a key pair (RSA 2048 or ML-DSA-65)
-#      12. Creates an RA profile (resolving EJBCA profile IDs dynamically)
-#      13. Issues a TSA certificate with the requested DN suffix
-#      14. Polls for certificate issuance completion
-#      15. Trusts the certificate chain (marks root CA as trusted, triggers validation)
-#      16. Creates and enables a TSP profile (clientCertificate + basicPassword, linked to the vault profile)
-#      17. Creates and enables a Signing Profile
+#      12. Creates a key pair
+#      13. Creates an RA profile (resolving EJBCA profile IDs dynamically)
+#      14. Issues a TSA certificate with the requested DN suffix
+#      15. Polls for certificate issuance completion
+#      16. Trusts the certificate chain (marks root CA as trusted, triggers validation)
+#      17. Creates and enables a TSP profile (clientCertificate + basicPassword, linked to the vault profile)
+#      18. Creates and enables a Signing Profile
 #          (qualified profile links to the Time Quality configuration)
-#      18. Links the Signing Profile to the TSP Profile bidirectionally
-#      19. Creates a Basic (username/password) credential on the TSP profile, mapped to the user
-#  20. Grants object-scoped timestamping permissions to the role (applied after both sets exist)
-#
-# Requires: curl, jq, base64
+#      19. Links the Signing Profile to the TSP Profile bidirectionally
+#      20. Creates a Basic (username/password) credential on the TSP profile, mapped to the user
+#  21. Grants object-scoped timestamping permissions to the role (applied after both sets exist)
 
 set -euo pipefail
+# Bash clears -e inside $(...). A function run in one therefore passes each nested failure out with || exit 1.
 
 # --- Defaults -----------------------------------------------------------------
 # Targets Core running directly from the IDE on the default port.
@@ -75,23 +75,38 @@ MLDSA_PREHASH_ATTR=""         # empty where the connector offers pure ML-DSA onl
 PKCS12_BUNDLE=""
 PKCS12_PASSWORD="00000000"
 TOKEN_PASSWORD=""          # defaults to PKCS12_PASSWORD when empty
-CERTIFICATE_DN=""          # used as prefix; -non-qualified / -qualified are appended
+CERTIFICATE_CN_PREFIX=""   # --certificate-dn; -non-qualified / -qualified are appended
 
 EJBCA_URL="https://ejbca.3key.company/ejbca/ejbcaws/ejbcaws?wsdl"
 EJBCA_EE_PROFILE="DemoTSAEndEntityProfile"
 EJBCA_CERT_PROFILE="DemoTSAEECertificateProfile"
 EJBCA_CERT_PROFILE_QUALIFIED="DemoTSAQCEECertificateProfile"
 EJBCA_CA_NAME="DemoRootCA_2307RSA"
+EJBCA_USERNAME_GEN_METHOD="CN"    # certificate CN is hardcoded in EJBCA
 
 CREDENTIAL_NAME="ejbca.3key.company"
 AUTHORITY_NAME="ejbca.3key.company"
 TOKEN_NAME="tsa"
 TOKEN_PROFILE_NAME="tsa"
-KEY_NAME_BASE="tsa-rsa"           # -non-qualified / -qualified appended
-RA_PROFILE_NAME_BASE="tsa"        # -non-qualified / -qualified appended
-KEY_ALGORITHM="RSA"               # RSA (implies RSA-2048) | MLDSA (implies pure ML-DSA-65)
-TSP_PROFILE_NAME_BASE="tsp"       # -non-qualified / -qualified appended
-SIGNING_PROFILE_NAME_BASE="tsa"   # -non-qualified / -qualified appended
+KEY_NAME_BASE=""                  # -non-qualified / -qualified appended
+RA_PROFILE_NAME_BASE=""           # -non-qualified / -qualified appended
+KEY_ALGORITHM="RSA"               # key algorithm code from the connector
+KEY_SPEC=""                       # NAME=VALUE,... over the connector's key-spec fields
+DEFAULT_RSA_KEY_SIZE=2048
+DEFAULT_MLDSA_LEVEL=3             # ML-DSA-65
+DEFAULT_MLDSA_PREHASH=false       # pure ML-DSA
+TSP_PROFILE_NAME_BASE=""          # -non-qualified / -qualified appended
+SIGNING_PROFILE_NAME_BASE=""      # -non-qualified / -qualified appended
+SET_NAME=""                       # set of objects and certificates
+DEFAULT_KEY_NAME_BASE="tsa-rsa"
+DEFAULT_TSA_NAME_BASE="tsa"
+DEFAULT_TSP_NAME_BASE="tsp"
+
+SIGNATURE_SCHEME=""
+SIGNATURE_DIGEST=""
+DEFAULT_SIGNATURE_SCHEME="PKCS1-v1_5"
+DEFAULT_SIGNATURE_DIGEST="SHA-384"
+ISSUER_CA_FILE=""
 TIMESTAMP_FORMATTING_CONNECTOR_NAME="timestamp-formatting-connector"
 
 # Vault backing for TSP Basic credentials.
@@ -164,6 +179,8 @@ VAULT_INSTANCE_UUID=""
 VAULT_PROFILE_UUID=""
 MAPPED_USER_UUID=""
 MAPPED_USER_ROLE_UUID=""
+ISSUER_CA_UUID=""
+KEY_SPEC_PAIRS="{}"         # --key-spec as a JSON object
 
 # Time Quality configuration
 TIME_QUALITY_UUID=""
@@ -208,7 +225,7 @@ Usage: $(basename "$0") [options]
 
 Required:
   --pkcs12-bundle FILE        Path to PKCS12 bundle with EJBCA client credentials
-  --certificate-dn PREFIX     DN prefix for TSA certificates.
+  --certificate-dn PREFIX     DN prefix for TSA certificates (optional with --set-name).
                               Actual CNs will be <PREFIX>-non-qualified and <PREFIX>-qualified.
   Plus the admin credential for the chosen --auth-mode (see "ILM API auth").
 
@@ -261,17 +278,25 @@ EJBCA options:
   --ejbca-cert-profile NAME   Certificate profile (non-qualified)(default: DemoTSAEECertificateProfile)
   --ejbca-cert-profile-qualified NAME
                               Certificate profile (qualified)    (default: DemoTSAQCEECertificateProfile)
+  --issuer-ca FILE            One root CA certificate (PEM or DER)
 
 Object name bases (suffixes -non-qualified / -qualified are appended automatically):
   --credential-name NAME      (default: ejbca.3key.company)
   --authority-name NAME       (default: ejbca.3key.company)
   --token-name NAME           (default: tsa)
   --token-profile-name NAME   (default: tsa)
-  --key-name NAME             base for key names          (default: tsa-rsa)
-  --key-algorithm ALG         TSA signing key algorithm: RSA | MLDSA (default: RSA)
-  --ra-profile-name NAME      base for RA profile names   (default: tsa)
-  --tsp-profile-name NAME     base for TSP profile names  (default: tsp)
-  --signing-profile-name NAME base for Signing Profile names (default: tsa)
+  --set-name NAME             names a set: ${DEFAULT_TSA_NAME_BASE}-NAME for its key, RA and Signing Profile,
+                              ${DEFAULT_TSP_NAME_BASE}-NAME for its TSP profile, NAME-<UTC timestamp> as its --certificate-dn
+  --key-name NAME             base for key names          (default: ${DEFAULT_KEY_NAME_BASE})
+  --ra-profile-name NAME      base for RA profile names   (default: ${DEFAULT_TSA_NAME_BASE})
+  --tsp-profile-name NAME     base for TSP profile names  (default: ${DEFAULT_TSP_NAME_BASE})
+  --signing-profile-name NAME base for Signing Profile names (default: ${DEFAULT_TSA_NAME_BASE})
+
+Key and signature:
+  --key-algorithm ALG         e.g. RSA | ECDSA | ML-DSA | SLH-DSA (default: RSA)
+  --key-spec NAME=VALUE,...   key-spec fields, e.g. data_ecdsaCurve=secp384r1 (default: RSA 2048 bits, ML-DSA level 3)
+  --signature-scheme SCHEME   data_rsaSigScheme, e.g. PKCS1-v1_5 | PSS (default: ${DEFAULT_SIGNATURE_SCHEME})
+  --signature-digest DIGEST   data_sigDigest, e.g. SHA-256 | SHA-384 | SHA-512 (default: ${DEFAULT_SIGNATURE_DIGEST})
 
 Certificate polling:
   --cert-poll-attempts N      Max poll attempts for certificate issuance (default: 20)
@@ -314,10 +339,13 @@ die()  { echo "ERROR: $*" >&2; exit 1; }
 
 TEMP_FILES=()
 cleanup() { [[ ${#TEMP_FILES[@]} -gt 0 ]] && rm -f "${TEMP_FILES[@]}"; return 0; }
-# Exit from the signal; EXIT does the cleanup.
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+
+# INT and TERM exit with the signal's status. The EXIT trap alone then removes TEMP_FILES.
+install_cleanup_traps() {
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
 
 # ilm_curl METHOD PATH [-d BODY]
 # Fails with a clear message on non-2xx HTTP status.
@@ -385,11 +413,15 @@ group_uuid() {
   echo "$uuid"
 }
 
+# offers_attribute ATTRS_JSON NAME
+offers_attribute() {
+  [[ -n "$(echo "$1" | jq -r --arg n "$2" 'first(.[] | select(.name==$n) | .uuid) // empty')" ]]
+}
+
 # request_attribute ATTRS_JSON NAME CONTENT_JSON
 request_attribute() {
   local attrs="$1" name="$2" content="$3"
-  [[ -z "$(echo "$attrs" | jq -r --arg n "$name" 'first(.[] | select(.name==$n) | .uuid) // empty')" ]] \
-    && die_missing_attribute "$attrs" "attribute  name='${name}'"
+  offers_attribute "$attrs" "$name" || die_missing_attribute "$attrs" "attribute  name='${name}'"
   echo "$attrs" | jq -c --arg n "$name" --argjson content "$content" '
     first(.[] | select(.name==$n)) as $d
     | if ($d.version | tostring | ltrimstr("v")) == "3"
@@ -406,8 +438,7 @@ chosen_attribute() {
   item=$(echo "$attrs" | jq -c --arg n "$name" --arg v "$value" \
     'first(.[] | select(.name==$n) | .content[]? | select((.data | tostring) == $v)) // empty')
   if [[ -z "$item" ]]; then
-    [[ -z "$(echo "$attrs" | jq -r --arg n "$name" 'first(.[] | select(.name==$n) | .uuid) // empty')" ]] \
-      && die_missing_attribute "$attrs" "attribute  name='${name}'"
+    offers_attribute "$attrs" "$name" || die_missing_attribute "$attrs" "attribute  name='${name}'"
     die "Attribute '${name}' offers no value '${value}'. Offered: $(echo "$attrs" \
       | jq -c --arg n "$name" '[.[] | select(.name==$n) | .content[]?.data]')"
   fi
@@ -422,7 +453,7 @@ find_named_item() {
 
 # uuid_of_named <list_json> <name> -> the item's uuid, or empty if not found.
 uuid_of_named() {
-  local match; match=$(find_named_item "$1" "$2")
+  local match; match=$(find_named_item "$1" "$2") || exit 1
   [[ -n "$match" ]] && echo "$match" | jq -r '.uuid // empty'
   return 0
 }
@@ -442,8 +473,8 @@ trim() {
 # csv_to_json_array <csv> [fallback_csv]
 csv_to_json_array() {
   local csv fallback
-  csv=$(trim "${1:-}")
-  fallback=$(trim "${2:-}")
+  csv=$(trim "${1:-}") || exit 1
+  fallback=$(trim "${2:-}") || exit 1
   [[ -z "$csv" ]] && csv="$fallback"
   [[ -z "$csv" || "$(printf '%s' "$csv" | tr '[:upper:]' '[:lower:]')" == "any" ]] && { echo '[]'; return 0; }
   jq -cn --arg csv "$csv" '$csv | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))'
@@ -456,7 +487,7 @@ parse_args() {
       --pkcs12-bundle)                          PKCS12_BUNDLE="$2";                          shift 2 ;;
       --pkcs12-password)                        PKCS12_PASSWORD="$2";                        shift 2 ;;
       --token-password)                         TOKEN_PASSWORD="$2";                         shift 2 ;;
-      --certificate-dn)                         CERTIFICATE_DN="$2";                         shift 2 ;;
+      --certificate-dn)                         CERTIFICATE_CN_PREFIX="$2";                  shift 2 ;;
       --ejbca-url)                              EJBCA_URL="$2";                              shift 2 ;;
       --connector-host)                         CONNECTOR_HOST="$2";                         shift 2 ;;
       --port-cred-provider)                     PORT_CRED_PROVIDER="$2";                     shift 2 ;;
@@ -491,6 +522,11 @@ parse_args() {
       --token-profile-name)                     TOKEN_PROFILE_NAME="$2";                     shift 2 ;;
       --key-name)                               KEY_NAME_BASE="$2";                          shift 2 ;;
       --key-algorithm)                          KEY_ALGORITHM="$2";                          shift 2 ;;
+      --key-spec)                               KEY_SPEC="$2";                               shift 2 ;;
+      --signature-scheme)                       SIGNATURE_SCHEME="$2";                       shift 2 ;;
+      --signature-digest)                       SIGNATURE_DIGEST="$2";                       shift 2 ;;
+      --issuer-ca)                              ISSUER_CA_FILE="$2";                         shift 2 ;;
+      --set-name)                               SET_NAME="$2";                               shift 2 ;;
       --ra-profile-name)                        RA_PROFILE_NAME_BASE="$2";                   shift 2 ;;
       --tsp-profile-name)                       TSP_PROFILE_NAME_BASE="$2";                  shift 2 ;;
       --signing-profile-name)                   SIGNING_PROFILE_NAME_BASE="$2";              shift 2 ;;
@@ -517,8 +553,12 @@ parse_args() {
 # --- Validation ---------------------------------------------------------------
 validate() {
   local errors=0
-  [[ -z "$PKCS12_BUNDLE" ]]    && { echo "ERROR: --pkcs12-bundle is required";    errors=$((errors+1)); }
-  [[ -z "$CERTIFICATE_DN" ]]   && { echo "ERROR: --certificate-dn is required";   errors=$((errors+1)); }
+  command -v jq     &>/dev/null || { echo "ERROR: jq is required but not installed";     exit 1; }
+  command -v curl   &>/dev/null || { echo "ERROR: curl is required but not installed";   exit 1; }
+  command -v base64 &>/dev/null || { echo "ERROR: base64 is required but not installed"; exit 1; }
+  resolve_object_names
+  [[ -z "$PKCS12_BUNDLE" ]] && { echo "ERROR: --pkcs12-bundle is required"; errors=$((errors+1)); }
+  [[ -z "$CERTIFICATE_CN_PREFIX" ]] && { echo "ERROR: --certificate-dn or --set-name is required"; errors=$((errors+1)); }
   case "$AUTH_MODE" in
     header) [[ -z "$CLIENT_CERT_PEM" ]]   && { echo "ERROR: --client-cert-pem is required for --auth-mode header"; errors=$((errors+1)); } ;;
     mtls)   [[ -z "$CLIENT_P12_BUNDLE" ]] && { echo "ERROR: --client-p12-bundle is required for --auth-mode mtls"; errors=$((errors+1)); } ;;
@@ -531,11 +571,10 @@ validate() {
   [[ -z "$(trim "$TSP_CREDENTIAL_PASSWORD")" ]] \
     && { echo "ERROR: --tsp-credential-password requires a non-blank value"; errors=$((errors+1)); }
   KEY_ALGORITHM=$(echo "$KEY_ALGORITHM" | tr '[:lower:]' '[:upper:]')
-  case "$KEY_ALGORITHM" in
-    RSA) ;;
-    MLDSA|ML-DSA) KEY_ALGORITHM="MLDSA" ;;
-    *) echo "ERROR: --key-algorithm must be RSA or MLDSA (got '$KEY_ALGORITHM')"; errors=$((errors+1)) ;;
-  esac
+  [[ "$KEY_ALGORITHM" == "MLDSA" ]] && KEY_ALGORITHM="ML-DSA"
+  [[ -z "$KEY_ALGORITHM" ]] && { echo "ERROR: --key-algorithm requires a value"; errors=$((errors+1)); }
+  KEY_SPEC_PAIRS=$(key_spec_pairs 2>/dev/null) \
+    || { echo "ERROR: --key-spec takes NAME=VALUE,... (got '$KEY_SPEC')"; errors=$((errors+1)); }
   CRYPTO_PROVIDER=$(echo "$CRYPTO_PROVIDER" | tr '[:upper:]' '[:lower:]')
   case "$CRYPTO_PROVIDER" in
     software-v1|software-v2|pkcs11) ;;
@@ -546,16 +585,33 @@ validate() {
   [[ $errors -gt 0 ]] && usage
 
   [[ ! -f "$PKCS12_BUNDLE" ]]   && { echo "ERROR: PKCS12 bundle not found: $PKCS12_BUNDLE"; exit 1; }
-
-  command -v jq     &>/dev/null || { echo "ERROR: jq is required but not installed";     exit 1; }
-  command -v curl   &>/dev/null || { echo "ERROR: curl is required but not installed";   exit 1; }
-  command -v base64 &>/dev/null || { echo "ERROR: base64 is required but not installed"; exit 1; }
+  if [[ -n "$ISSUER_CA_FILE" ]]; then
+    [[ ! -f "$ISSUER_CA_FILE" ]] && { echo "ERROR: --issuer-ca file not found: $ISSUER_CA_FILE"; exit 1; }
+    command -v openssl &>/dev/null || { echo "ERROR: openssl is required for --issuer-ca"; exit 1; }
+  fi
 
   [[ -z "$TOKEN_PASSWORD" ]] && TOKEN_PASSWORD="$PKCS12_PASSWORD"
 
   validate_json_summary_destination
   configure_authentication
   configure_crypto_provider
+}
+
+resolve_object_names() {
+  local tsa="$DEFAULT_TSA_NAME_BASE" tsp="$DEFAULT_TSP_NAME_BASE" key="$DEFAULT_KEY_NAME_BASE"
+  if [[ -n "$SET_NAME" ]]; then
+    [[ -z "$CERTIFICATE_CN_PREFIX" ]] && CERTIFICATE_CN_PREFIX=$(timestamped_cn_prefix "$SET_NAME")
+    tsa="${DEFAULT_TSA_NAME_BASE}-${SET_NAME}"; tsp="${DEFAULT_TSP_NAME_BASE}-${SET_NAME}"; key="$tsa"
+  fi
+  KEY_NAME_BASE="${KEY_NAME_BASE:-$key}"
+  RA_PROFILE_NAME_BASE="${RA_PROFILE_NAME_BASE:-$tsa}"
+  TSP_PROFILE_NAME_BASE="${TSP_PROFILE_NAME_BASE:-$tsp}"
+  SIGNING_PROFILE_NAME_BASE="${SIGNING_PROFILE_NAME_BASE:-$tsa}"
+}
+
+# timestamped_cn_prefix <set_name> -> <set_name>-<UTC timestamp>.
+timestamped_cn_prefix() {
+  echo "${1}-$(date -u +%Y%m%d-%H%M%S)"
 }
 
 configure_crypto_provider() {
@@ -778,7 +834,7 @@ create_connector() {
   local _resp
   log "Creating ${desc}..."
   _resp=$(ilm_curl POST /v2/connectors -d \
-    "{\"name\":\"${name}\",\"url\":\"http://${CONNECTOR_HOST}:${port}\",\"authType\":\"none\",\"customAttributes\":[],\"version\":\"${version}\"}")
+    "{\"name\":\"${name}\",\"url\":\"http://${CONNECTOR_HOST}:${port}\",\"authType\":\"none\",\"customAttributes\":[],\"version\":\"${version}\"}") || exit 1
   require_uuid "$_resp" "${name} connector"
 }
 
@@ -942,7 +998,7 @@ setup_vault_instance() {
 connector_interface_uuid() {
   local connector_uuid="$1" code="$2" iface
   iface=$(list_paginated /v2/connectors/list | jq -r --arg u "$connector_uuid" --arg c "$code" \
-    'first(.[] | select(.uuid==$u) | .interfaces[] | select(.code==$c) | .uuid) // empty')
+    'first(.[] | select(.uuid==$u) | .interfaces[] | select(.code==$c) | .uuid) // empty') || exit 1
   [[ -z "$iface" ]] && die "Connector ${connector_uuid} exposes no '${code}' interface"
   echo "$iface"
 }
@@ -977,6 +1033,9 @@ setup_vault_profile() {
 }
 
 # --- Step 6: Token ------------------------------------------------------------
+SET_NAME_FLAGS="--set-name, or --key-name, --ra-profile-name, --tsp-profile-name, --signing-profile-name"
+FRESH_TOKEN_NAMES_HINT="choose fresh object names (--token-name and --token-profile-name, plus ${SET_NAME_FLAGS}) and re-run"
+
 # A token is reused by name only when it lives on the --crypto-provider connector.
 setup_token() {
   local _resp _existing _list token_attrs kind=""
@@ -986,7 +1045,8 @@ setup_token() {
   if [[ -n "$_existing" ]]; then
     TOKEN_UUID=$(echo "$_existing" | jq -r '.uuid')
     [[ "$(echo "$_existing" | jq -r '.connectorUuid // empty')" != "$CRYPTO_CONN_UUID" ]] && die \
-      "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) lives on connector '$(echo "$_existing" | jq -r '.connectorName // "unknown"')', not on '${CRYPTO_CONN_NAME}'; pass the --crypto-provider it was created on, or choose fresh object names (--token-name, --token-profile-name, --key-name, --ra-profile-name, --tsp-profile-name, --signing-profile-name) and re-run"
+      "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) lives on connector '$(echo "$_existing" | jq -r '.connectorName // "unknown"')', not on '${CRYPTO_CONN_NAME}'; pass the --crypto-provider it was created on, or ${FRESH_TOKEN_NAMES_HINT}"
+    require_token_usable
     ok "reusing existing token '${TOKEN_NAME}'  $TOKEN_UUID"
     return 0
   fi
@@ -1010,6 +1070,18 @@ setup_token() {
   ok "token  $TOKEN_UUID"
 }
 
+require_token_usable() {
+  local reload status
+  reload=$(ilm_curl PATCH "/v1/tokens/${TOKEN_UUID}") \
+    || die "Could not reload existing token '${TOKEN_NAME}' (${TOKEN_UUID}) at connector '${CRYPTO_CONN_NAME}'; start the connector where it is down, else ${FRESH_TOKEN_NAMES_HINT}"
+  status=$(echo "$reload" | jq -r '.status.status // empty | ascii_downcase')
+  case "$status" in
+    disconnected) die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is disconnected at connector '${CRYPTO_CONN_NAME}'; ${FRESH_TOKEN_NAMES_HINT}" ;;
+    deactivated)  die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is deactivated at connector '${CRYPTO_CONN_NAME}'; activate it in Core, or ${FRESH_TOKEN_NAMES_HINT}" ;;
+  esac
+  return 0
+}
+
 # The software provider serves one token form on both registrations. It returns two different
 # attribute schemas depending on whether it already has any token instances:
 #   - empty connector  -> data_createTokenAction/newTokenName/tokenCode at top level
@@ -1028,25 +1100,25 @@ software_token_attributes() {
   fi
 
   log "Fetching software provider token attribute definitions..."
-  token_attr_defs=$(ilm_curl GET "$form_path")
+  token_attr_defs=$(ilm_curl GET "$form_path") || exit 1
 
   if [[ -n "$(echo "$token_attr_defs" | jq -r 'first(.[] | select(.name=="data_options" and .type=="data") | .uuid) // empty')" ]]; then
-    load_group_uuid=$(group_uuid "$token_attr_defs" "group_loadToken")
+    load_group_uuid=$(group_uuid "$token_attr_defs" "group_loadToken") || exit 1
     log "Resolving 'new token' attributes via connector callback..."
     create_attrs=$(ilm_curl POST "$callback_path" -d \
       "$(jq -n --arg uuid "$load_group_uuid" \
-        '{uuid:$uuid,name:"group_loadToken",pathVariable:{option:"new"},requestParameter:{},body:{}}')")
-    options_attr=$(chosen_attribute "$token_attr_defs" "data_options" "new")
+        '{uuid:$uuid,name:"group_loadToken",pathVariable:{option:"new"},requestParameter:{},body:{}}')") || exit 1
+    options_attr=$(chosen_attribute "$token_attr_defs" "data_options" "new") || exit 1
   else
     create_attrs="$token_attr_defs"
   fi
 
-  action_attr=$(request_attribute "$create_attrs" "data_createTokenAction" '[{"reference":"new","data":"new"}]')
+  action_attr=$(request_attribute "$create_attrs" "data_createTokenAction" '[{"reference":"new","data":"new"}]') || exit 1
   # The connector names a keystore with letters, digits and underscores only.
   name_attr=$(request_attribute "$create_attrs" "data_newTokenName" \
-    "$(jq -nc --arg name "${TOKEN_NAME//-/_}" '[{data: $name}]')")
+    "$(jq -nc --arg name "${TOKEN_NAME//-/_}" '[{data: $name}]')") || exit 1
   code_attr=$(request_attribute "$create_attrs" "data_tokenCode" \
-    "$(jq -nc --arg code "$TOKEN_PASSWORD" '[{data: {secret: $code}}]')")
+    "$(jq -nc --arg code "$TOKEN_PASSWORD" '[{data: {secret: $code}}]')") || exit 1
   jq -nc --argjson action "$action_attr" --argjson name "$name_attr" --argjson code "$code_attr" \
     --arg options "$options_attr" \
     '[$action, $name, $code] + (if $options == "" then [] else [$options | fromjson] end)'
@@ -1066,21 +1138,22 @@ pkcs11_uri_token_label() {
 
 # A pkcs11 token is addressed by its config profile (ref proxy sidecar), and PKCS#11 URI of a token.
 pkcs11_token_attributes() {
-  local token_attr_defs profile_attr token_attr_uuid iface_uuid offered item matches token_attr pin_attr
+  local token_attr_defs profile_attr token_attr_uuid iface_uuid offered item label matches token_attr pin_attr
 
   log "Fetching pkcs11 token attribute definitions..."
-  token_attr_defs=$(ilm_curl GET "/v1/tokens/${CRYPTO_CONN_UUID}/attributes")
-  profile_attr=$(chosen_attribute "$token_attr_defs" "profile" "$PKCS11_PROFILE")
-  token_attr_uuid=$(attr_uuid "$token_attr_defs" "token" "string")
-  iface_uuid=$(connector_interface_uuid "$CRYPTO_CONN_UUID" "cryptography")
+  token_attr_defs=$(ilm_curl GET "/v1/tokens/${CRYPTO_CONN_UUID}/attributes") || exit 1
+  profile_attr=$(chosen_attribute "$token_attr_defs" "profile" "$PKCS11_PROFILE") || exit 1
+  token_attr_uuid=$(attr_uuid "$token_attr_defs" "token" "string") || exit 1
+  iface_uuid=$(connector_interface_uuid "$CRYPTO_CONN_UUID" "cryptography") || exit 1
 
   log "Listing the tokens of profile '${PKCS11_PROFILE}' via connector callback..."
   offered=$(ilm_curl POST "/v2/connectors/${CRYPTO_CONN_UUID}/callback" -d \
     "$(jq -nc --arg uuid "$token_attr_uuid" --arg iface "$iface_uuid" --argjson profile "$profile_attr" \
-      '{name: "token", uuid: $uuid, interfaceUuid: $iface, attributes: [$profile]}')")
+      '{name: "token", uuid: $uuid, interfaceUuid: $iface, attributes: [$profile]}')") || exit 1
   matches="[]"
   while IFS= read -r item; do
-    if [[ "$(pkcs11_uri_token_label "$(echo "$item" | jq -r '.data')")" == "$PKCS11_TOKEN" ]]; then
+    label=$(pkcs11_uri_token_label "$(echo "$item" | jq -r '.data')") || exit 1
+    if [[ "$label" == "$PKCS11_TOKEN" ]]; then
       matches=$(echo "$matches" | jq -c --argjson item "$item" '. + [$item]')
     fi
   done < <(echo "$offered" | jq -c '.[]')
@@ -1090,10 +1163,10 @@ pkcs11_token_attributes() {
     *) die "Profile '${PKCS11_PROFILE}' offers more than one token labelled '${PKCS11_TOKEN}': $(echo "$matches" | jq -c '[.[].data]')" ;;
   esac
 
-  token_attr=$(request_attribute "$token_attr_defs" "token" "$(echo "$matches" | jq -c '[.[0] | {data, reference}]')")
+  token_attr=$(request_attribute "$token_attr_defs" "token" "$(echo "$matches" | jq -c '[.[0] | {data, reference}]')") || exit 1
   pin_attr=$(request_attribute "$token_attr_defs" "pin" \
     "$(jq -nc --arg uuid "$PIN_SECRET_UUID" --arg name "$PIN_SECRET_NAME" \
-      '[{data: {resource: "secrets", uuid: $uuid, name: $name}}]')")
+      '[{data: {resource: "secrets", uuid: $uuid, name: $name}}]')") || exit 1
   jq -nc --argjson profile "$profile_attr" --argjson token "$token_attr" --argjson pin "$pin_attr" \
     '[$profile, $token, $pin]'
 }
@@ -1179,14 +1252,15 @@ record_time_quality_settings() {
 }
 
 setup_time_quality_config() {
-  local _resp ntp_servers_json _existing _list
+  local _resp ntp_servers_json _existing _list _detail
 
   _list=$(list_paginated /v1/timeQualityConfigurations/list)
   _existing=$(find_named_item "$_list" "$TIME_QUALITY_CONFIG_NAME")
   if [[ -n "$_existing" ]]; then
     TIME_QUALITY_UUID=$(echo "$_existing" | jq -r '.uuid')
     if [[ -n "$JSON_SUMMARY_FILE" ]]; then
-      record_time_quality_settings "$(ilm_curl GET "/v1/timeQualityConfigurations/${TIME_QUALITY_UUID}")"
+      _detail=$(ilm_curl GET "/v1/timeQualityConfigurations/${TIME_QUALITY_UUID}")
+      record_time_quality_settings "$_detail"
     fi
     ok "reusing existing Time Quality configuration '${TIME_QUALITY_CONFIG_NAME}'  $TIME_QUALITY_UUID"
     return 0
@@ -1270,7 +1344,7 @@ setup_mapped_user() {
 # to the concrete TSP/signing profiles, token and token profile, which only exist after the TSA sets
 # are built -- so they are applied later by grant_timestamping_permissions().
 setup_timestamping_role() {
-  local _resp _existing _list
+  local _resp _existing _list _roles
 
   _list=$(ilm_curl GET /v1/roles)
   _existing=$(find_named_item "$_list" "$MAPPED_USER_ROLE_NAME")
@@ -1286,8 +1360,8 @@ setup_timestamping_role() {
     ok "role  $MAPPED_USER_ROLE_UUID"
   fi
 
-  if [[ "$(ilm_curl GET "/v1/users/${MAPPED_USER_UUID}/roles" \
-        | jq -r --arg u "$MAPPED_USER_ROLE_UUID" 'any(.[]; .uuid==$u)')" == "true" ]]; then
+  _roles=$(ilm_curl GET "/v1/users/${MAPPED_USER_UUID}/roles")
+  if [[ "$(echo "$_roles" | jq -r --arg u "$MAPPED_USER_ROLE_UUID" 'any(.[]; .uuid==$u)')" == "true" ]]; then
     ok "role already attached to user '${MAPPED_USER_USERNAME}'"
   else
     log "Attaching role '${MAPPED_USER_ROLE_NAME}' to user '${MAPPED_USER_USERNAME}'..."
@@ -1296,69 +1370,124 @@ setup_timestamping_role() {
   fi
 }
 
-# --- Step 11: Key pair --------------------------------------------------------
-key_algorithm_code() {
-  case "$KEY_ALGORITHM" in
-    MLDSA) echo "ML-DSA" ;;
-    *)     echo "RSA" ;;
-  esac
+# --- Step 11: Issuing CA ------------------------------------------------------
+# Core fetches an issuing CA from the CA Issuers URI of its certificates.
+# A CA whose certificates lack that URI comes from --issuer-ca.
+setup_issuer_ca() {
+  [[ -z "$ISSUER_CA_FILE" ]] && return 0
+  local der_b64 fingerprint _resp
+  der_b64=$(certificate_der_base64 "$ISSUER_CA_FILE")
+  fingerprint=$(certificate_fingerprint "$der_b64")
+  ISSUER_CA_UUID=$(certificate_uuid_by_fingerprint "$fingerprint")
+  if [[ -n "$ISSUER_CA_UUID" ]]; then
+    ok "Core holds the issuing CA from ${ISSUER_CA_FILE}  $ISSUER_CA_UUID"
+  else
+    log "Uploading the issuing CA from ${ISSUER_CA_FILE}..."
+    _resp=$(ilm_curl POST /v1/certificates/upload -d \
+      "$(jq -nc --arg certificate "$der_b64" '{certificate: $certificate, customAttributes: []}')")
+    ISSUER_CA_UUID=$(require_uuid "$_resp" "issuing CA from ${ISSUER_CA_FILE}")
+    ok "issuing CA  $ISSUER_CA_UUID"
+  fi
+  mark_certificate_as_trusted "$ISSUER_CA_UUID"
 }
 
-MLDSA65_PUBLIC_KEY_BITS=15616 # 1952 bytes
+# certificate_der_base64 <file> -> the certificate in <file>, PEM or DER, as base64 DER.
+certificate_der_base64() {
+  local file="$1" form
+  for form in PEM DER; do
+    if openssl x509 -in "$file" -inform "$form" -noout 2>/dev/null; then
+      openssl x509 -in "$file" -inform "$form" -outform DER | base64 | tr -d '\n'
+      return 0
+    fi
+  done
+  die "--issuer-ca ${file} holds no PEM or DER certificate"
+}
 
-# An existing key is matched by name alone, so a rerun that changes --key-algorithm or
-# --crypto-provider would otherwise reuse the old material and report the requested algorithm over it.
+# certificate_fingerprint <der_base64> -> Core's FINGERPRINT for a certificate: the lowercase hex SHA-256 of its DER.
+certificate_fingerprint() {
+  printf '%s' "$1" | openssl base64 -d -A | openssl dgst -sha256 -r | cut -d' ' -f1
+}
+
+# certificate_uuid_by_fingerprint <sha256_hex> -> the uuid of the certificate Core holds under it, or empty.
+certificate_uuid_by_fingerprint() {
+  ilm_curl POST /v1/certificates -d "$(jq -nc --arg fingerprint "$1" \
+      '{itemsPerPage: 1, pageNumber: 1, includeArchived: true,
+        filters: [{fieldSource: "property", fieldIdentifier: "FINGERPRINT", condition: "EQUALS", value: $fingerprint}]}')" \
+    | jq -r 'first(.certificates[]?.uuid) // empty'
+}
+
+# --- Step 12: Key pair --------------------------------------------------------
+# An existing key is matched by name alone. A rerun that changes the key algorithm, the key spec or --crypto-provider
+# would otherwise reuse the old material and report the requested key over it.
 # Usage: require_key_spec <key_details_json> <key_name> <key_uuid>
 require_key_spec() {
-  local key_details="$1" key_name="$2" key_uuid="$3" want actual spec want_spec length prehash
-  local hint="choose fresh object names (--key-name, --ra-profile-name, --tsp-profile-name, --signing-profile-name) and re-run"
+  local key_details="$1" key_name="$2" key_uuid="$3" actual requested mismatch held_names unheld
+  local hint="choose fresh object names (${SET_NAME_FLAGS}) and re-run"
   [[ "$(echo "$key_details" | jq -r '.tokenInstanceUuid // empty')" != "$TOKEN_UUID" ]] \
     && die "Existing key '${key_name}' (${key_uuid}) lives on token '$(echo "$key_details" | jq -r '.tokenInstanceName // "unknown"')', not on '${TOKEN_NAME}'; ${hint}"
-  want=$(key_algorithm_code)
   actual=$(echo "$key_details" | jq -r 'first(.items[]?.keyAlgorithm) // empty')
-  [[ "$actual" != "$want" ]] \
-    && die "Existing key '${key_name}' (${key_uuid}) is ${actual:-of an unknown algorithm}, but --key-algorithm asks for ${want}; ${hint}"
+  [[ "$actual" != "$KEY_ALGORITHM" ]] \
+    && die "Existing key '${key_name}' (${key_uuid}) is ${actual:-of an unknown algorithm}, but --key-algorithm asks for ${KEY_ALGORITHM}; ${hint}"
 
-  if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
-    length=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Public") | .length) // empty')
-    [[ "$length" != "$MLDSA65_PUBLIC_KEY_BITS" ]] \
-      && die "Existing key '${key_name}' (${key_uuid}) has a ${length:-?}-bit ML-DSA public key, but --key-algorithm MLDSA provisions ML-DSA-65, whose public key has ${MLDSA65_PUBLIC_KEY_BITS} bits; ${hint}"
-    # Only the v1 software provider records a prehash flag, in the private key item.
-    if [[ "$CRYPTO_PROVIDER" == "software-v1" ]]; then
-      prehash=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Private") | .keyData | fromjson? | objects | .prehash | select(. != null) | tostring) // empty')
-      [[ "$prehash" != "false" ]] \
-        && die "Existing key '${key_name}' (${key_uuid}) records prehash=${prehash:-nothing}, but --key-algorithm MLDSA provisions pure ML-DSA-65; ${hint}"
-    fi
-    return 0
+  # Core stores the key-spec attributes a key was created with.
+  [[ "$(echo "$key_details" | jq '(.attributes // []) | length')" == 0 ]] \
+    && die "Existing key '${key_name}' (${key_uuid}) holds no creation attributes to check its key spec against; ${hint}"
+  requested=$(requested_key_spec)
+  mismatch=$(echo "$key_details" | jq -r --argjson req "$requested" '
+    [(.attributes // [])[] | select($req[.name] != null)
+     | {name, held: (.content // [] | map(.data | tostring) | join("|"))}
+     | select(.held != $req[.name])
+     | "\(.name)=\(.held), but the run asks for \(.name)=\($req[.name])"] | join("; ")')
+  [[ -n "$mismatch" ]] && die "Existing key '${key_name}' (${key_uuid}) holds ${mismatch}; ${hint}"
+  held_names=$(echo "$key_details" | jq -c '[(.attributes // [])[].name]')
+  unheld=$(key_spec_names_outside "$held_names" "$requested")
+  [[ -n "$unheld" ]] && die "Existing key '${key_name}' (${key_uuid}) holds no ${unheld}, which the run asks for; ${hint}"
+
+  if [[ "$KEY_ALGORITHM" == "ML-DSA" && "$CRYPTO_PROVIDER" == "software-v1" ]]; then
+    require_recorded_prehash "$key_details" "$key_name" "$key_uuid" "$requested" "$hint"
   fi
-  spec=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Public") | "RSA \(.length) bits") // empty')
-  want_spec="RSA 2048 bits"
-  [[ "$spec" == "$want_spec" ]] && return 0
-  die "Existing key '${key_name}' (${key_uuid}) is ${spec:-of an unknown key spec}, but --key-algorithm ${KEY_ALGORITHM} provisions ${want_spec}; ${hint}"
+  return 0
+}
+
+# Usage: require_recorded_prehash <key_details_json> <key_name> <key_uuid> <requested_json> <hint>
+require_recorded_prehash() {
+  local key_details="$1" key_name="$2" key_uuid="$3" requested="$4" hint="$5" prehash want_prehash
+  want_prehash=$(echo "$requested" | jq -r --arg n "$MLDSA_PREHASH_ATTR" '.[$n]')
+  prehash=$(echo "$key_details" | jq -r 'first(.items[]? | select(.type == "Private") | .keyData | fromjson? | objects | .prehash | select(. != null) | tostring) // empty')
+  [[ "$prehash" == "$want_prehash" ]] && return 0
+  die "Existing key '${key_name}' (${key_uuid}) records prehash=${prehash:-nothing}, but the run asks for ${MLDSA_PREHASH_ATTR}=${want_prehash}; ${hint}"
 }
 
 # Usage: signing_operation_attributes <attrs_json>
 signing_operation_attributes() {
-  local attrs="$1" sig_scheme sig_digest
+  local attrs="$1" scheme_attrs digest_attrs
+  scheme_attrs=$(signature_field "$attrs" data_rsaSigScheme --signature-scheme "$SIGNATURE_SCHEME" "$DEFAULT_SIGNATURE_SCHEME") || exit 1
+  digest_attrs=$(signature_field "$attrs" data_sigDigest    --signature-digest "$SIGNATURE_DIGEST" "$DEFAULT_SIGNATURE_DIGEST") || exit 1
+  jq -nc --argjson scheme_attrs "$scheme_attrs" --argjson digest_attrs "$digest_attrs" '$scheme_attrs + $digest_attrs'
+}
 
-  if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
+# signature_field <attrs_json> <field_name> <option_name> <option_value> <default>
+# The result is [the field set to <option_value>, else <default>], or [] where the key lacks the field.
+signature_field() {
+  local attrs="$1" field_name="$2" option_name="$3" option_value="$4" default="$5" field
+  if ! offers_attribute "$attrs" "$field_name"; then
+    [[ -n "$option_value" ]] && die \
+      "${option_name} sets ${field_name}, which the ${KEY_ALGORITHM} key's signature lacks. Offered: $(echo "$attrs" | jq -c '[.[].name]')"
     echo '[]'
     return 0
   fi
-
-  sig_scheme=$(chosen_attribute "$attrs" "data_rsaSigScheme" "PKCS1-v1_5")
-  sig_digest=$(chosen_attribute "$attrs" "data_sigDigest"    "SHA-384")
-  jq -nc --argjson scheme "$sig_scheme" --argjson digest "$sig_digest" '[$scheme, $digest]'
+  field=$(chosen_attribute "$attrs" "$field_name" "${option_value:-$default}") || exit 1
+  jq -nc --argjson field "$field" '[$field]'
 }
 
 # The key spec is a group the connector resolves once the algorithm is chosen.
-# Usage: key_spec_definitions <keypair_attr_defs> <algorithm_code> <key_alg_attr_json>
+# Usage: key_spec_definitions <keypair_attr_defs> <key_alg_attr_json>
 key_spec_definitions() {
-  local keypair_attr_defs="$1" algorithm_code="$2" key_alg_attr="$3" key_spec_group_uuid
-  key_spec_group_uuid=$(group_uuid "$keypair_attr_defs" "$KEY_SPEC_GROUP")
+  local keypair_attr_defs="$1" key_alg_attr="$2" key_spec_group_uuid
+  key_spec_group_uuid=$(group_uuid "$keypair_attr_defs" "$KEY_SPEC_GROUP") || exit 1
   if [[ "$CRYPTO_PROVIDER" == "software-v1" ]]; then
     ilm_curl POST "/v1/keys/${TOKEN_PROFILE_UUID}/callback" -d \
-      "$(jq -n --arg uuid "$key_spec_group_uuid" --arg name "$KEY_SPEC_GROUP" --arg algorithm "$algorithm_code" \
+      "$(jq -n --arg uuid "$key_spec_group_uuid" --arg name "$KEY_SPEC_GROUP" --arg algorithm "$KEY_ALGORITHM" \
         '{"uuid":$uuid,"name":$name,"pathVariable":{"algorithm":$algorithm},
           "requestParameter":{},"body":{},"filter":{}}')"
   else
@@ -1368,12 +1497,97 @@ key_spec_definitions() {
   fi
 }
 
+requested_key_spec() {
+  local defaults='{}'
+  case "$KEY_ALGORITHM" in
+    RSA)
+      defaults=$(jq -nc --arg size_attr "$RSA_KEY_SIZE_ATTR" --arg size "$DEFAULT_RSA_KEY_SIZE" '{($size_attr): $size}') ;;
+    ML-DSA)
+      defaults=$(jq -nc --arg level_attr "$MLDSA_LEVEL_ATTR" --arg level "$DEFAULT_MLDSA_LEVEL" \
+        --arg prehash_attr "$MLDSA_PREHASH_ATTR" --arg prehash "$DEFAULT_MLDSA_PREHASH" \
+        '{($level_attr): $level} + (if $prehash_attr == "" then {} else {($prehash_attr): $prehash} end)') ;;
+  esac
+  jq -nc --argjson defaults "$defaults" --argjson pairs "$KEY_SPEC_PAIRS" '$defaults + $pairs'
+}
+
+key_spec_pairs() {
+  jq -cn --arg spec "$KEY_SPEC" '
+    [$spec | split(",")[] | select(test("\\S"))
+     | (capture("^\\s*(?<name>[^=\\s][^=]*?)\\s*=\\s*(?<value>\\S.*?)\\s*$") // error("not NAME=VALUE: \(.)"))]
+    | map({(.name): .value}) | add // {}'
+}
+
+key_spec_names_outside() {
+  jq -rn --argjson names "$1" --argjson pairs "$2" \
+    '[$pairs | keys[] | select(. as $n | $names | index($n) | not)] | join(", ")'
+}
+
+require_offered_key_spec_names() {
+  local names unknown
+  names=$(echo "$1" | jq -c '[.[] | select(.type == "data") | .name]') || exit 1
+  unknown=$(key_spec_names_outside "$names" "$KEY_SPEC_PAIRS") || exit 1
+  [[ -z "$unknown" ]] && return 0
+  die "--key-spec names ${unknown}, which the ${KEY_ALGORITHM} key spec lacks. Offered: ${names}"
+}
+
+# Usage: key_spec_attributes <key_spec_defs> <requested_json>
+key_spec_attributes() {
+  local defs="$1" requested="$2" fields missing plan name value offered attr attrs='[]'
+  local has_default_def='def has_default: .properties.list != true and ((.content // []) | length > 0);'
+  require_offered_key_spec_names "$defs"
+  fields=$(echo "$defs" | jq -c '[.[] | select(.type == "data")]') || exit 1
+  missing=$(jq -rn --argjson fields "$fields" --argjson req "$requested" "${has_default_def}"'
+    first($fields[] | select(.properties.required == true and (.name as $n | $req | has($n) | not) and (has_default | not))
+          | "\(.name)\t\([.content[]?.data] | tojson)") // empty') || exit 1
+  if [[ -n "$missing" ]]; then
+    IFS=$'\t' read -r name offered <<<"$missing"
+    die "${KEY_ALGORITHM} key-spec field '${name}' needs a value; pass --key-spec ${name}=VALUE. Offered: ${offered}"
+  fi
+  plan=$(jq -rn --argjson fields "$fields" --argjson req "$requested" "${has_default_def}"'
+    $fields[] | .name as $n
+    | if $req | has($n) then [$n, $req[$n]]
+      elif .properties.required == true and has_default then [$n, (.content[0].data | tostring)]
+      else empty end
+    | @tsv') || exit 1
+  [[ -z "$plan" ]] && { echo '[]'; return 0; }
+  while IFS=$'\t' read -r name value; do
+    attr=$(key_spec_attribute "$defs" "$name" "$value") || exit 1
+    attrs=$(jq -nc --argjson attrs "$attrs" --argjson attr "$attr" '$attrs + [$attr]')
+  done <<<"$plan"
+  echo "$attrs"
+}
+
+# Usage: key_spec_attribute <key_spec_defs> <name> <value>
+key_spec_attribute() {
+  local defs="$1" name="$2" value="$3" field content
+  field=$(echo "$defs" | jq -c --arg n "$name" 'first(.[] | select(.name == $n))') || exit 1
+  if field_takes_offered_item "$field" "$value"; then
+    chosen_attribute "$defs" "$name" "$value"
+    return
+  fi
+  content=$(echo "$field" | jq -c --arg v "$value" '[{data: (
+      if .contentType == "boolean" then (if $v == "true" then true elif $v == "false" then false else error end)
+      elif .contentType == "integer" or .contentType == "float" then ($v | tonumber)
+      else $v end)}]' 2>/dev/null) \
+    || die "Key-spec field '${name}' takes a $(echo "$field" | jq -r '.contentType') value; got '${value}'"
+  request_attribute "$defs" "$name" "$content"
+}
+
+# field_takes_offered_item <field_json> <value>
+field_takes_offered_item() {
+  [[ "$(echo "$1" | jq --arg v "$2" '(.properties.list == true) or any(.content[]?; (.data | tostring) == $v)')" == "true" ]]
+}
+
+key_spec_summary() {
+  echo "$1" | jq -r 'map("\(.name)=\(.content | map(.data | tostring) | join("|"))") | join(", ")'
+}
+
 # Usage: setup_key_pair <key_name> <out_key_uuid_var> <out_priv_item_uuid_var>
 setup_key_pair() {
   local key_name="$1" out_key_uuid="$2" out_priv_item_uuid="$3"
   local _resp keypair_attr_defs key_alias_attr key_alg_attr
-  local key_spec_attrs rsa_key_size_attr key_details _key_uuid _priv_uuid _existing _list
-  local algorithm_code key_spec_json mldsa_level_attr mldsa_prehash_attr
+  local key_spec_defs key_details _key_uuid _priv_uuid _existing _list
+  local requested key_spec_json
 
   _list=$(ilm_curl GET /v1/keys/pairs)
   _existing=$(find_named_item "$_list" "$key_name")
@@ -1394,27 +1608,15 @@ setup_key_pair() {
   log "Fetching key pair attribute definitions..."
   keypair_attr_defs=$(ilm_curl GET \
     "/v1/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/keyPair/attributes")
-  algorithm_code=$(key_algorithm_code)
-  key_alg_attr=$(chosen_attribute "$keypair_attr_defs" "$KEY_ALGORITHM_ATTR" "$algorithm_code")
+  key_alg_attr=$(chosen_attribute "$keypair_attr_defs" "$KEY_ALGORITHM_ATTR" "$KEY_ALGORITHM")
   key_alias_attr=$(request_attribute "$keypair_attr_defs" "$KEY_ALIAS_ATTR" \
     "$(jq -nc --arg name "$key_name" '[{data: $name}]')")
 
-  log "Fetching ${algorithm_code} key-spec attributes via callback..."
-  key_spec_attrs=$(key_spec_definitions "$keypair_attr_defs" "$algorithm_code" "$key_alg_attr")
-
-  if [[ "$KEY_ALGORITHM" == "MLDSA" ]]; then
-    mldsa_level_attr=$(chosen_attribute "$key_spec_attrs" "$MLDSA_LEVEL_ATTR" 3)
-    key_spec_json=$(jq -nc --argjson level "$mldsa_level_attr" '[$level]')
-    if [[ -n "$MLDSA_PREHASH_ATTR" ]]; then
-      mldsa_prehash_attr=$(chosen_attribute "$key_spec_attrs" "$MLDSA_PREHASH_ATTR" false)
-      key_spec_json=$(jq -nc --argjson spec "$key_spec_json" --argjson prehash "$mldsa_prehash_attr" '$spec + [$prehash]')
-    fi
-    log "Creating ML-DSA-65 key pair '${key_name}'..."
-  else
-    rsa_key_size_attr=$(chosen_attribute "$key_spec_attrs" "$RSA_KEY_SIZE_ATTR" 2048)
-    key_spec_json=$(jq -nc --argjson size "$rsa_key_size_attr" '[$size]')
-    log "Creating RSA 2048 key pair '${key_name}'..."
-  fi
+  log "Fetching ${KEY_ALGORITHM} key-spec attributes via callback..."
+  key_spec_defs=$(key_spec_definitions "$keypair_attr_defs" "$key_alg_attr")
+  requested=$(requested_key_spec)
+  key_spec_json=$(key_spec_attributes "$key_spec_defs" "$requested")
+  log "Creating ${KEY_ALGORITHM} key pair '${key_name}' ($(key_spec_summary "$key_spec_json"))..."
 
   _resp=$(ilm_curl POST \
     "/v1/tokens/${TOKEN_UUID}/tokenProfiles/${TOKEN_PROFILE_UUID}/keys/keyPair" -d \
@@ -1430,7 +1632,7 @@ setup_key_pair() {
         attributes: ([$keyAlias, $keyAlg] + $keySpec),
         customAttributes: []
       }')")
-  _key_uuid=$(require_uuid "$_resp" "${algorithm_code} key pair '${key_name}'")
+  _key_uuid=$(require_uuid "$_resp" "${KEY_ALGORITHM} key pair '${key_name}'")
   ok "key  $_key_uuid"
 
   log "Enabling key..."
@@ -1452,7 +1654,7 @@ setup_key_pair() {
   printf -v "$out_priv_item_uuid" '%s' "$_priv_uuid"
 }
 
-# --- Step 12: RA profile (with dynamic EJBCA profile lookup) ------------------
+# --- Step 13: RA profile (with dynamic EJBCA profile lookup) ------------------
 # Usage: setup_ra_profile <ra_name> <cert_profile_name> <out_ra_profile_uuid_var>
 setup_ra_profile() {
   local ra_name="$1" ejbca_cert_profile="$2" out_ra_uuid="$3"
@@ -1536,19 +1738,20 @@ setup_ra_profile() {
   log "Creating RA profile '${ra_name}'..."
   _resp=$(ilm_curl POST "/v1/authorities/${AUTH_UUID}/raProfiles" -d \
     "$(jq -n \
-      --arg  name          "$ra_name" \
-      --arg  eeProfileName "$EJBCA_EE_PROFILE" \
-      --argjson eeId       "$ee_profile_id" \
-      --arg  eeAttrUuid    "$ee_profile_attr_uuid" \
-      --arg  cpName        "$ejbca_cert_profile" \
-      --argjson cpId       "$cert_profile_id" \
-      --arg  cpAttrUuid    "$cert_profile_attr_uuid" \
-      --arg  caName        "$EJBCA_CA_NAME" \
-      --argjson caId       "$ejbca_ca_id" \
-      --arg  caAttrUuid    "$ca_attr_uuid" \
-      --arg  snAttrUuid    "$send_notif_attr_uuid" \
-      --arg  krAttrUuid    "$key_recover_attr_uuid" \
-      --arg  ugAttrUuid    "$username_gen_attr_uuid" \
+      --arg     name              "$ra_name" \
+      --arg     eeProfileName     "$EJBCA_EE_PROFILE" \
+      --argjson eeId              "$ee_profile_id" \
+      --arg     eeAttrUuid        "$ee_profile_attr_uuid" \
+      --arg     cpName            "$ejbca_cert_profile" \
+      --argjson cpId              "$cert_profile_id" \
+      --arg     cpAttrUuid        "$cert_profile_attr_uuid" \
+      --arg     caName            "$EJBCA_CA_NAME" \
+      --argjson caId              "$ejbca_ca_id" \
+      --arg     caAttrUuid        "$ca_attr_uuid" \
+      --arg     snAttrUuid        "$send_notif_attr_uuid" \
+      --arg     krAttrUuid        "$key_recover_attr_uuid" \
+      --arg     ugAttrUuid        "$username_gen_attr_uuid" \
+      --arg     usernameGenMethod "$EJBCA_USERNAME_GEN_METHOD" \
       '{
         name: $name,
         description: "",
@@ -1590,7 +1793,7 @@ setup_ra_profile() {
           },
           {
             name: "usernameGenMethod",
-            content: [{data: "CN"}],
+            content: [{data: $usernameGenMethod}],
             contentType: "string",
             uuid: $ugAttrUuid,
             version: "v2"
@@ -1608,7 +1811,7 @@ setup_ra_profile() {
   printf -v "$out_ra_uuid" '%s' "$_ra_uuid"
 }
 
-# --- Step 13: Issue TSA certificate -------------------------------------------
+# --- Step 14: Issue TSA certificate -------------------------------------------
 # Usage: issue_certificate <cn> <key_uuid> <priv_item_uuid> <ra_profile_uuid> <out_cert_uuid_var>
 issue_certificate() {
   local cn="$1" key_uuid="$2" priv_item_uuid="$3" ra_profile_uuid="$4" out_cert_uuid="$5"
@@ -1656,7 +1859,7 @@ issue_certificate() {
   printf -v "$out_cert_uuid" '%s' "$_cert_uuid"
 }
 
-# --- Step 14: Poll for certificate issuance result ----------------------------
+# --- Step 15: Poll for certificate issuance result ----------------------------
 # Usage: poll_certificate <cert_uuid> <cn>
 poll_certificate() {
   local cert_uuid="$1" cn="$2"
@@ -1698,16 +1901,17 @@ poll_certificate() {
 }
 
 
-# --- Step 15: Trust the certificate chain -------------------------------------
+# --- Step 16: Trust the certificate chain -------------------------------------
 # Usage: trust_certificate_chain <cert_uuid>
 #
-# Walks issuerCertificateUuid upward from <cert_uuid> and marks the root CA as
-# trustedCa=true. Then waits for the certificate to be re-validated as VALID.
-# Required before creating a signing profile: ILM rejects certificates
-# whose issuer chain is not fully trusted or whose validation status is not VALID.
+# A signing profile needs this step. ILM rejects a certificate whose chain is untrusted or awaits re-validation.
 trust_certificate_chain() {
   local cert_uuid="$1"
   log "Trusting certificate chain for ${cert_uuid}..."
+
+  if [[ -n "$ISSUER_CA_UUID" ]]; then
+    refresh_issuer_linkage "$cert_uuid"
+  fi
 
   local root_uuid
   root_uuid=$(find_root_certificate "$cert_uuid")
@@ -1718,18 +1922,22 @@ trust_certificate_chain() {
   ok "Certificate chain trusted and validated"
 }
 
+# refresh_issuer_linkage <cert_uuid>
+refresh_issuer_linkage() {
+  ilm_curl GET "/v1/certificates/${1}/chain" >/dev/null
+}
+
 # find_root_certificate <cert_uuid>
-# Returns the UUID of the root CA, or empty if cert is self-signed.
 find_root_certificate() {
   local cert_uuid="$1"
   local current_uuid
 
-  current_uuid=$(wait_for_issuer_linkage "$cert_uuid")
+  current_uuid=$(wait_for_issuer_linkage "$cert_uuid") || exit 1
   [[ -z "$current_uuid" ]] && return 0
 
   while [[ -n "$current_uuid" ]]; do
     local cert_details next_uuid
-    cert_details=$(ilm_curl GET "/v1/certificates/${current_uuid}")
+    cert_details=$(ilm_curl GET "/v1/certificates/${current_uuid}") || exit 1
     next_uuid=$(echo "$cert_details" | jq -r '.issuerCertificateUuid // empty')
 
     if [[ -z "$next_uuid" ]]; then
@@ -1749,7 +1957,7 @@ wait_for_issuer_linkage() {
   local cert_details current_uuid attempt
 
   for (( attempt=1; attempt<=10; attempt++ )); do
-    cert_details=$(ilm_curl GET "/v1/certificates/${cert_uuid}")
+    cert_details=$(ilm_curl GET "/v1/certificates/${cert_uuid}") || exit 1
     current_uuid=$(echo "$cert_details" | jq -r '.issuerCertificateUuid // empty')
 
     [[ -n "$current_uuid" ]] && { echo "$current_uuid"; return 0; }
@@ -1763,11 +1971,22 @@ wait_for_issuer_linkage() {
       log "  Issuer linkage not yet available, waiting... (${attempt}/10)"
       sleep 0.5
     else
-      local issuer
-      issuer=$(echo "$cert_details" | jq -r '.issuerDn // empty')
-      die "Certificate ${cert_uuid} has issuerDn='${issuer}' but issuerCertificateUuid is still empty after ${attempt} attempts. Issuer cert may not be in the platform."
+      die_unlinked_issuer "$cert_uuid" "$cert_details" "$attempt"
     fi
   done
+}
+
+# die_unlinked_issuer <cert_uuid> <cert_details_json> <attempts>
+die_unlinked_issuer() {
+  local cert_uuid="$1" attempts="$3" issuer ca_details ca_subject
+  issuer=$(echo "$2" | jq -r '.issuerDn // empty')
+  [[ -z "$ISSUER_CA_UUID" ]] && die \
+    "Core holds no issuer certificate for ${cert_uuid} (issuerDn='${issuer}') after ${attempts} attempts; pass the issuing CA with --issuer-ca FILE"
+  ca_details=$(ilm_curl GET "/v1/certificates/${ISSUER_CA_UUID}") || exit 1
+  ca_subject=$(echo "$ca_details" | jq -r '.subjectDn // empty')
+  [[ "$ca_subject" != "$issuer" ]] && die \
+    "Core holds no issuer certificate for ${cert_uuid} (issuerDn='${issuer}') after ${attempts} attempts; --issuer-ca ${ISSUER_CA_FILE} holds '${ca_subject}'"
+  die "Core has not linked ${cert_uuid} to its issuing CA '${ca_subject}' from --issuer-ca after ${attempts} attempts; re-run to resume the set"
 }
 
 # is_self_signed <cert_details_json>
@@ -1788,16 +2007,12 @@ mark_certificate_as_trusted() {
 }
 
 # wait_for_certificate_validation <cert_uuid>
-# Polls until the certificate validationStatus becomes VALID after trusting the chain.
-# Marking the root CA as trusted does NOT automatically trigger re-validation, so we
-# explicitly request validation results which triggers validation as a side effect.
 wait_for_certificate_validation() {
   local cert_uuid="$1"
   local validation_result validation_status attempt
 
   log "  Waiting for certificate ${cert_uuid} to be re-validated..."
   for (( attempt=1; attempt<=20; attempt++ )); do
-    # Request validation result; this endpoint triggers validation if not recent
     validation_result=$(ilm_curl GET "/v1/certificates/${cert_uuid}/validate")
     validation_status=$(echo "$validation_result" | jq -r '.resultStatus // empty')
 
@@ -1814,7 +2029,7 @@ wait_for_certificate_validation() {
   done
 }
 
-# --- Step 16: TSP profile -----------------------------------------------------
+# --- Step 17: TSP profile -----------------------------------------------------
 # Usage: setup_tsp_profile <name> <out_tsp_uuid_var>
 setup_tsp_profile() {
   local tsp_name="$1" out_tsp_uuid="$2"
@@ -1849,7 +2064,7 @@ setup_tsp_profile() {
   printf -v "$out_tsp_uuid" '%s' "$_tsp_uuid"
 }
 
-# --- Step 17: Signing Profile -------------------------------------------------
+# --- Step 18: Signing Profile -------------------------------------------------
 # Usage: setup_signing_profile <sp_name> <cert_uuid> <policy_oid> <time_quality_uuid> <timestamp_formatting_conn_uuid> <out_sp_uuid_var>
 #
 # Pass a non-empty <time_quality_uuid> for the qualified profile to enable
@@ -1928,7 +2143,7 @@ setup_signing_profile() {
   printf -v "$out_sp_uuid" '%s' "$_sp_uuid"
 }
 
-# --- Step 18: Link Signing Profile ↔ TSP Profile (bidirectional) --------------
+# --- Step 19: Link Signing Profile ↔ TSP Profile (bidirectional) --------------
 # Usage: link_tsp_signing_profile <tsp_uuid> <tsp_name> <sp_uuid>
 #
 # Direction 1: TSP profile → Signing Profile (sets defaultSigningProfileUuid)
@@ -1957,7 +2172,7 @@ link_tsp_signing_profile() {
   ok "TSP protocol activated  signingUrl=$(echo "$_resp" | jq -r '.signingUrl // "(unknown)"')"
 }
 
-# --- Step 19: TSP Basic credential --------------------------------------------
+# --- Step 20: TSP Basic credential --------------------------------------------
 # Usage: setup_tsp_basic_credential <tsp_uuid> <out_cred_uuid_var>
 # Creates a username/password credential on the TSP profile, mapped to MAPPED_USER_UUID.
 # Idempotent: usernames are unique per profile, so an existing one is reused.
@@ -2001,7 +2216,7 @@ setup_tsp_basic_credential() {
   printf -v "$out_cred_uuid" '%s' "$_cred_uuid"
 }
 
-# --- Step 20: Object-scoped timestamping permissions --------------------------
+# --- Step 21: Object-scoped timestamping permissions --------------------------
 # Applied after both TSA sets exist, so every grant targets concrete object UUIDs rather than the
 # whole resource. The OPA method policy (auth-opa-policies/policies/method_policy.rego)
 # honors object-scoped grants for BOTH request shapes on the timestamp path:
@@ -2103,12 +2318,27 @@ grant_timestamping_permissions() {
 }
 
 # --- Per-set orchestration ----------------------------------------------------
+# resumable_key_certificate <key_uuid> -> "<uuid>\t<common name>"
+# EJBCA binds a key to one end entity only.
+resumable_key_certificate() {
+  local key_details cert_uuids cert_uuid cert uuid_and_cn
+  key_details=$(ilm_curl GET "/v1/keys/$1") || exit 1
+  cert_uuids=$(echo "$key_details" | jq -r '.associations[]? | select(.resource == "certificates") | .uuid')
+  for cert_uuid in $cert_uuids; do
+    cert=$(ilm_curl GET "/v1/certificates/${cert_uuid}") || exit 1
+    uuid_and_cn=$(echo "$cert" | jq -r 'def resumable: .state | IN("requested", "pending_approval", "pending_issue", "issued");
+      select(resumable) | "\(.uuid)\t\(.commonName)"')
+    [[ -n "$uuid_and_cn" ]] && { echo "$uuid_and_cn"; return 0; }
+  done
+  return 0
+}
+
 # setup_tsa_set <suffix> <ejbca_cert_profile> <policy_oid> <time_quality_uuid> <global_suffix>
 #
 # Idempotent. If the set's Signing Profile already exists the whole set is treated as already configured and reused
 # WITHOUT issuing a new certificate: EJBCA binds a key to a single end-entity - reusing keys is rejected.
-# Reuse also keeps the profile's stored allowedPolicyIds/allowedDigestAlgorithms: they are fixed at creation,
-# so --allowed-* only take effect on a fresh environment, or on a run with different object name bases.
+# Reuse also keeps the profile's signature settings and allowedPolicyIds/allowedDigestAlgorithms, fixed at creation.
+# --signature-* and --allowed-* therefore take effect only on a fresh environment, or on a run with new object names.
 setup_tsa_set() {
   local suffix="$1" cert_profile="$2" policy_oid="$3" tq_uuid="$4" g="$5"
   local key_name="${KEY_NAME_BASE}-${suffix}"
@@ -2117,7 +2347,7 @@ setup_tsa_set() {
   local sp_name="${SIGNING_PROFILE_NAME_BASE}-${suffix}"
   local key_uuid="" priv_uuid="" ra_uuid="" cert_uuid="" cert_cn="" tsp_uuid="" cred_uuid="" sp_uuid=""
   local set_policy_oid="" set_tq_uuid=""
-  local existing_sp _list sp_details
+  local existing_sp _list sp_details resumable_cert key_details
 
   log "=== Setting up TSA ${suffix} set ==="
 
@@ -2128,12 +2358,13 @@ setup_tsa_set() {
     _list=$(ilm_curl GET /v1/keys/pairs)
     key_uuid=$(uuid_of_named "$_list" "$key_name")
     [[ -z "$key_uuid" ]] && die "Reused Signing Profile '${sp_name}' ($sp_uuid) has no matching key pair '${key_name}'; resolve the inconsistency (recreate or rename the key pair) and re-run"
-    require_key_spec "$(ilm_curl GET "/v1/keys/${key_uuid}")" "$key_name" "$key_uuid"
+    key_details=$(ilm_curl GET "/v1/keys/${key_uuid}")
+    require_key_spec "$key_details" "$key_name" "$key_uuid"
     if [[ "$(echo "$existing_sp" | jq -r '.enabled // false')" != "true" ]]; then
       ilm_curl PATCH "/v1/signingProfiles/${sp_uuid}/enable" >/dev/null
       ok "re-enabled disabled Signing Profile '${sp_name}'"
     fi
-    ok "TSA ${suffix} set already configured (Signing Profile '${sp_name}'  $sp_uuid); reusing, no new certificate issued and its stored request-validation allow-lists are kept"
+    ok "TSA ${suffix} set already configured (Signing Profile '${sp_name}'  $sp_uuid); reusing, no new certificate issued and its stored signature settings and request-validation allow-lists are kept"
     _list=$(ilm_curl GET /v1/raProfiles)
     ra_uuid=$(uuid_of_named "$_list" "$ra_name")
     [[ -z "$ra_uuid" ]] && die "Reused Signing Profile '${sp_name}' ($sp_uuid) has no matching RA profile '${ra_name}'; resolve the inconsistency (recreate or rename the RA profile) and re-run"
@@ -2154,14 +2385,20 @@ setup_tsa_set() {
   else
     setup_key_pair    "$key_name" key_uuid priv_uuid
     setup_ra_profile  "$ra_name" "$cert_profile" ra_uuid
-    issue_certificate "${CERTIFICATE_DN}-${suffix}" "$key_uuid" "$priv_uuid" "$ra_uuid" cert_uuid
-    poll_certificate  "$cert_uuid" "${CERTIFICATE_DN}-${suffix}"
+    resumable_cert=$(resumable_key_certificate "$key_uuid")
+    if [[ -n "$resumable_cert" ]]; then
+      IFS=$'\t' read -r cert_uuid cert_cn <<<"$resumable_cert"
+      ok "reusing certificate CN=${cert_cn} of key '${key_name}'  $cert_uuid"
+    else
+      cert_cn="${CERTIFICATE_CN_PREFIX}-${suffix}"
+      issue_certificate "$cert_cn" "$key_uuid" "$priv_uuid" "$ra_uuid" cert_uuid
+    fi
+    poll_certificate  "$cert_uuid" "$cert_cn"
     trust_certificate_chain "$cert_uuid"
     setup_tsp_profile "$tsp_name" tsp_uuid
     setup_signing_profile "$sp_name" "$cert_uuid" "$policy_oid" "$tq_uuid" "$TIMESTAMP_FORMATTING_CONN_UUID" sp_uuid
     link_tsp_signing_profile "$tsp_uuid" "$tsp_name" "$sp_uuid"
     setup_tsp_basic_credential "$tsp_uuid" cred_uuid
-    cert_cn="${CERTIFICATE_DN}-${suffix}"
     set_policy_oid="$policy_oid"
     set_tq_uuid="$tq_uuid"
   fi
@@ -2187,6 +2424,8 @@ print_summary() {
   local q_tsp_name="${TSP_PROFILE_NAME_BASE}-qualified"
   local nq_sp_name="${SIGNING_PROFILE_NAME_BASE}-non-qualified"
   local q_sp_name="${SIGNING_PROFILE_NAME_BASE}-qualified"
+  local set_name
+  set_name=$(recorded_set_name)
 
   cat <<EOF
 
@@ -2207,7 +2446,7 @@ Setup complete. Created resources:
     mapped-user     $MAPPED_USER_USERNAME                $MAPPED_USER_UUID
     role            $MAPPED_USER_ROLE_NAME               $MAPPED_USER_ROLE_UUID  (object-scoped: tspProfiles, signingProfiles, keys, tokens, tokenProfiles)
 
-  TSA non-qualified set:
+  TSA ${set_name} non-qualified set:
     key             $nq_key_name    $KEY_UUID_NQ
     ra-profile      $nq_ra_name     $RA_PROFILE_UUID_NQ
     certificate     CN=${ISSUED_CERT_CN_NQ}   $ISSUED_CERT_UUID_NQ
@@ -2215,7 +2454,7 @@ Setup complete. Created resources:
     signing-profile $nq_sp_name     $SIGNING_PROFILE_UUID_NQ
     basic-cred      $TSP_CREDENTIAL_USERNAME (mapped user $MAPPED_USER_USERNAME)   $TSP_CREDENTIAL_UUID_NQ
 
-  TSA qualified set:
+  TSA ${set_name} qualified set:
     time-quality    $TIME_QUALITY_CONFIG_NAME       $TIME_QUALITY_UUID
     key             $q_key_name     $KEY_UUID_Q
     ra-profile      $q_ra_name      $RA_PROFILE_UUID_Q
@@ -2224,6 +2463,22 @@ Setup complete. Created resources:
     signing-profile $q_sp_name      $SIGNING_PROFILE_UUID_Q
     basic-cred      $TSP_CREDENTIAL_USERNAME (mapped user $MAPPED_USER_USERNAME)   $TSP_CREDENTIAL_UUID_Q
 EOF
+}
+
+existing_summary_sets() {
+  [[ -s "$1" ]] || { echo '{}'; return 0; }
+  jq -c 'def named_set_entry: type == "object" and has("nonQualified");
+    .sets | if type == "object" then with_entries(select(.value | named_set_entry)) else {} end' "$1" 2>/dev/null || echo '{}'
+}
+
+recorded_set_name() {
+  echo "${SET_NAME:-$KEY_NAME_BASE}"
+}
+
+issued_cn_prefix() {
+  local nq_prefix="${ISSUED_CERT_CN_NQ%-non-qualified}" q_prefix="${ISSUED_CERT_CN_Q%-qualified}"
+  [[ "$nq_prefix" == "$q_prefix" ]] && echo "$nq_prefix"
+  return 0
 }
 
 write_json_summary() {
@@ -2242,26 +2497,32 @@ write_json_summary() {
   [[ "$mode" == "600" ]] \
     || warn "$JSON_SUMMARY_FILE will hold the TSP Basic credential password at mode ${mode:-unknown}, not 0600; this filesystem does not enforce POSIX permissions - protect the file yourself"
 
-  jq -n \
+  local set_name cn_prefix existing_sets
+  set_name=$(recorded_set_name)
+  cn_prefix=$(issued_cn_prefix)
+  existing_sets=$(existing_summary_sets "$JSON_SUMMARY_FILE")
+
+  jq \
     --arg ilmHost "$ILM_HOST" \
     --arg connectorHost "$CONNECTOR_HOST" \
-    --arg certificateDn "$CERTIFICATE_DN" \
+    --arg setName "$set_name" \
+    --arg cnPrefix "$cn_prefix" \
     --arg cryptoProvider "$CRYPTO_PROVIDER" \
-    --arg credConnName "$CRED_CONN_NAME"                    --arg credConnUuid "$CRED_CONN_UUID" \
-    --arg ejbcaConnName "$EJBCA_CONN_NAME"                  --arg ejbcaConnUuid "$EJBCA_CONN_UUID" \
-    --arg cryptoConnName "$CRYPTO_CONN_NAME"                --arg cryptoConnUuid "$CRYPTO_CONN_UUID" \
-    --arg tfcConnName "$TIMESTAMP_FORMATTING_CONN_NAME"     --arg tfcConnUuid "$TIMESTAMP_FORMATTING_CONN_UUID" \
-    --arg vaultConnName "$VAULT_CONN_NAME"                  --arg vaultConnUuid "$VAULT_CONN_UUID" \
-    --arg credentialName "$CREDENTIAL_NAME"                 --arg credentialUuid "$CRED_UUID" \
-    --arg authorityName "$AUTHORITY_NAME"                   --arg authorityUuid "$AUTH_UUID" \
-    --arg tokenName "$TOKEN_NAME"                           --arg tokenUuid "$TOKEN_UUID" \
-    --arg tokenProfileName "$TOKEN_PROFILE_NAME"            --arg tokenProfileUuid "$TOKEN_PROFILE_UUID" \
-    --arg vaultInstanceName "$VAULT_INSTANCE_NAME"          --arg vaultInstanceUuid "$VAULT_INSTANCE_UUID" \
-    --arg vaultProfileName "$VAULT_PROFILE_NAME"            --arg vaultProfileUuid "$VAULT_PROFILE_UUID" \
-    --arg mappedUserName "$MAPPED_USER_USERNAME"            --arg mappedUserUuid "$MAPPED_USER_UUID" \
-    --arg roleName "$MAPPED_USER_ROLE_NAME"                 --arg roleUuid "$MAPPED_USER_ROLE_UUID" \
-    --arg basicUser "$TSP_CREDENTIAL_USERNAME"              --arg basicPassword "$TSP_CREDENTIAL_PASSWORD" \
-    --arg tqName "$TIME_QUALITY_CONFIG_NAME"                --arg tqUuid "$TIME_QUALITY_UUID" \
+    --arg credConnName "$CRED_CONN_NAME"                        --arg credConnUuid "$CRED_CONN_UUID" \
+    --arg ejbcaConnName "$EJBCA_CONN_NAME"                      --arg ejbcaConnUuid "$EJBCA_CONN_UUID" \
+    --arg cryptoConnName "$CRYPTO_CONN_NAME"                    --arg cryptoConnUuid "$CRYPTO_CONN_UUID" \
+    --arg tfcConnName "$TIMESTAMP_FORMATTING_CONN_NAME"         --arg tfcConnUuid "$TIMESTAMP_FORMATTING_CONN_UUID" \
+    --arg vaultConnName "$VAULT_CONN_NAME"                      --arg vaultConnUuid "$VAULT_CONN_UUID" \
+    --arg credentialName "$CREDENTIAL_NAME"                     --arg credentialUuid "$CRED_UUID" \
+    --arg authorityName "$AUTHORITY_NAME"                       --arg authorityUuid "$AUTH_UUID" \
+    --arg tokenName "$TOKEN_NAME"                               --arg tokenUuid "$TOKEN_UUID" \
+    --arg tokenProfileName "$TOKEN_PROFILE_NAME"                --arg tokenProfileUuid "$TOKEN_PROFILE_UUID" \
+    --arg vaultInstanceName "$VAULT_INSTANCE_NAME"              --arg vaultInstanceUuid "$VAULT_INSTANCE_UUID" \
+    --arg vaultProfileName "$VAULT_PROFILE_NAME"                --arg vaultProfileUuid "$VAULT_PROFILE_UUID" \
+    --arg mappedUserName "$MAPPED_USER_USERNAME"                --arg mappedUserUuid "$MAPPED_USER_UUID" \
+    --arg roleName "$MAPPED_USER_ROLE_NAME"                     --arg roleUuid "$MAPPED_USER_ROLE_UUID" \
+    --arg basicUser "$TSP_CREDENTIAL_USERNAME"                  --arg basicPassword "$TSP_CREDENTIAL_PASSWORD" \
+    --arg tqName "$TIME_QUALITY_CONFIG_NAME"                    --arg tqUuid "$TIME_QUALITY_UUID" \
     --arg tqAccuracy "$TIME_QUALITY_EFFECTIVE_ACCURACY" \
     --argjson tqNtpServers "$TIME_QUALITY_EFFECTIVE_NTP_SERVERS_JSON" \
     --arg tqMaxDrift "$TIME_QUALITY_EFFECTIVE_MAX_CLOCK_DRIFT" \
@@ -2270,42 +2531,36 @@ write_json_summary() {
     --arg tqSamplesPerServer "$TIME_QUALITY_EFFECTIVE_NTP_SAMPLES_PER_SERVER" \
     --arg tqMinReachable "$TIME_QUALITY_EFFECTIVE_NTP_SERVERS_MIN_REACHABLE" \
     --arg tqLeapSecondGuard "$TIME_QUALITY_EFFECTIVE_LEAP_SECOND_GUARD" \
-    --arg nqPolicyOid "$POLICY_OID_NQ"                      --arg qPolicyOid "$POLICY_OID_Q" \
-    --arg nqTqUuid "$TIME_QUALITY_UUID_NQ"                  --arg qTqUuid "$TIME_QUALITY_UUID_Q" \
-    --arg nqKeyName "${KEY_NAME_BASE}-non-qualified"        --arg nqKeyUuid "$KEY_UUID_NQ" \
-    --arg nqRaName "${RA_PROFILE_NAME_BASE}-non-qualified"  --arg nqRaUuid "$RA_PROFILE_UUID_NQ" \
-    --arg nqCertCn "$ISSUED_CERT_CN_NQ"                     --arg nqCertUuid "$ISSUED_CERT_UUID_NQ" \
-    --arg nqTspName "${TSP_PROFILE_NAME_BASE}-non-qualified" --arg nqTspUuid "$TSP_PROFILE_UUID_NQ" \
+    --arg nqPolicyOid "$POLICY_OID_NQ"                          --arg qPolicyOid "$POLICY_OID_Q" \
+    --arg nqTqUuid "$TIME_QUALITY_UUID_NQ"                      --arg qTqUuid "$TIME_QUALITY_UUID_Q" \
+    --arg nqKeyName "${KEY_NAME_BASE}-non-qualified"            --arg nqKeyUuid "$KEY_UUID_NQ" \
+    --arg nqRaName "${RA_PROFILE_NAME_BASE}-non-qualified"      --arg nqRaUuid "$RA_PROFILE_UUID_NQ" \
+    --arg nqCertCn "$ISSUED_CERT_CN_NQ"                         --arg nqCertUuid "$ISSUED_CERT_UUID_NQ" \
+    --arg nqTspName "${TSP_PROFILE_NAME_BASE}-non-qualified"    --arg nqTspUuid "$TSP_PROFILE_UUID_NQ" \
     --arg nqCredUuid "$TSP_CREDENTIAL_UUID_NQ" \
     --arg nqSpName "${SIGNING_PROFILE_NAME_BASE}-non-qualified" --arg nqSpUuid "$SIGNING_PROFILE_UUID_NQ" \
-    --arg qKeyName "${KEY_NAME_BASE}-qualified"             --arg qKeyUuid "$KEY_UUID_Q" \
-    --arg qRaName "${RA_PROFILE_NAME_BASE}-qualified"       --arg qRaUuid "$RA_PROFILE_UUID_Q" \
-    --arg qCertCn "$ISSUED_CERT_CN_Q"                       --arg qCertUuid "$ISSUED_CERT_UUID_Q" \
-    --arg qTspName "${TSP_PROFILE_NAME_BASE}-qualified"     --arg qTspUuid "$TSP_PROFILE_UUID_Q" \
+    --arg qKeyName "${KEY_NAME_BASE}-qualified"                 --arg qKeyUuid "$KEY_UUID_Q" \
+    --arg qRaName "${RA_PROFILE_NAME_BASE}-qualified"           --arg qRaUuid "$RA_PROFILE_UUID_Q" \
+    --arg qCertCn "$ISSUED_CERT_CN_Q"                           --arg qCertUuid "$ISSUED_CERT_UUID_Q" \
+    --arg qTspName "${TSP_PROFILE_NAME_BASE}-qualified"         --arg qTspUuid "$TSP_PROFILE_UUID_Q" \
     --arg qCredUuid "$TSP_CREDENTIAL_UUID_Q" \
-    --arg qSpName "${SIGNING_PROFILE_NAME_BASE}-qualified"  --arg qSpUuid "$SIGNING_PROFILE_UUID_Q" \
-    --arg keyAlgorithm "$(key_algorithm_code)" \
-    '{
+    --arg qSpName "${SIGNING_PROFILE_NAME_BASE}-qualified"      --arg qSpUuid "$SIGNING_PROFILE_UUID_Q" \
+    --arg keyAlgorithm "$KEY_ALGORITHM" \
+    '. as $existingSets | {
       ilmHost: $ilmHost,
       connectorHost: $connectorHost,
-      certificateDnPrefix: $certificateDn,
-      cryptoProvider: $cryptoProvider,
       connectors: {
         credentialProvider:  { name: $credConnName,   uuid: $credConnUuid },
         ejbca:               { name: $ejbcaConnName,  uuid: $ejbcaConnUuid },
-        cryptographyProvider:{ name: $cryptoConnName, uuid: $cryptoConnUuid },
         timestampFormatting: { name: $tfcConnName,    uuid: $tfcConnUuid },
         vault:               { name: $vaultConnName,  uuid: $vaultConnUuid }
       },
       credential:    { name: $credentialName,   uuid: $credentialUuid },
       authority:     { name: $authorityName,    uuid: $authorityUuid },
-      token:         { name: $tokenName,        uuid: $tokenUuid },
-      tokenProfile:  { name: $tokenProfileName, uuid: $tokenProfileUuid },
       vaultInstance: { name: $vaultInstanceName, uuid: $vaultInstanceUuid },
       vaultProfile:  { name: $vaultProfileName, uuid: $vaultProfileUuid },
       mappedUser:    { username: $mappedUserName, uuid: $mappedUserUuid },
       role:          { name: $roleName, uuid: $roleUuid },
-      tspCredential: { username: $basicUser, password: $basicPassword },
       timeQuality: {
         name:                   $tqName, uuid: $tqUuid, accuracy: $tqAccuracy,
         ntpServers:             $tqNtpServers, maxClockDrift: $tqMaxDrift,
@@ -2314,33 +2569,39 @@ write_json_summary() {
         ntpServersMinReachable: ($tqMinReachable     | tonumber? // null),
         leapSecondGuard:        (if $tqLeapSecondGuard == "" then null else $tqLeapSecondGuard == "true" end)
       },
-      sets: {
-        nonQualified: {
-          qualified: false,
-          keyAlgorithm:    $keyAlgorithm,
-          policyOid:       (if $nqPolicyOid == "" then null else $nqPolicyOid end),
-          timeQualityUuid: (if $nqTqUuid == "" then null else $nqTqUuid end),
-          key:             { name: $nqKeyName,  uuid: $nqKeyUuid },
-          raProfile:       { name: $nqRaName,   uuid: $nqRaUuid },
-          certificate:     { commonName: (if $nqCertCn == "" then null else $nqCertCn end), uuid: $nqCertUuid },
-          tspProfile:      { name: $nqTspName,  uuid: $nqTspUuid },
-          basicCredential: { username: $basicUser, uuid: $nqCredUuid },
-          signingProfile:  { name: $nqSpName,   uuid: $nqSpUuid }
-        },
-        qualified: {
-          qualified: true,
-          keyAlgorithm:    $keyAlgorithm,
-          policyOid:       (if $qPolicyOid == "" then null else $qPolicyOid end),
-          timeQualityUuid: (if $qTqUuid == "" then null else $qTqUuid end),
-          key:             { name: $qKeyName,  uuid: $qKeyUuid },
-          raProfile:       { name: $qRaName,   uuid: $qRaUuid },
-          certificate:     { commonName: (if $qCertCn == "" then null else $qCertCn end), uuid: $qCertUuid },
-          tspProfile:      { name: $qTspName,  uuid: $qTspUuid },
-          basicCredential: { username: $basicUser, uuid: $qCredUuid },
-          signingProfile:  { name: $qSpName,   uuid: $qSpUuid }
+      sets: ($existingSets + {
+        ($setName): {
+          cryptoProvider:      $cryptoProvider,
+          connector:           { name: $cryptoConnName,   uuid: $cryptoConnUuid },
+          token:               { name: $tokenName,        uuid: $tokenUuid },
+          tokenProfile:        { name: $tokenProfileName, uuid: $tokenProfileUuid },
+          keyAlgorithm:        $keyAlgorithm,
+          certificateDnPrefix: (if $cnPrefix == "" then null else $cnPrefix end),
+          nonQualified: {
+            qualified: false,
+            policyOid:       (if $nqPolicyOid == "" then null else $nqPolicyOid end),
+            timeQualityUuid: (if $nqTqUuid == "" then null else $nqTqUuid end),
+            key:             { name: $nqKeyName,  uuid: $nqKeyUuid },
+            raProfile:       { name: $nqRaName,   uuid: $nqRaUuid },
+            certificate:     { commonName: (if $nqCertCn == "" then null else $nqCertCn end), uuid: $nqCertUuid },
+            tspProfile:      { name: $nqTspName,  uuid: $nqTspUuid },
+            basicCredential: { username: $basicUser, password: $basicPassword, uuid: $nqCredUuid },
+            signingProfile:  { name: $nqSpName,   uuid: $nqSpUuid }
+          },
+          qualified: {
+            qualified: true,
+            policyOid:       (if $qPolicyOid == "" then null else $qPolicyOid end),
+            timeQualityUuid: (if $qTqUuid == "" then null else $qTqUuid end),
+            key:             { name: $qKeyName,  uuid: $qKeyUuid },
+            raProfile:       { name: $qRaName,   uuid: $qRaUuid },
+            certificate:     { commonName: (if $qCertCn == "" then null else $qCertCn end), uuid: $qCertUuid },
+            tspProfile:      { name: $qTspName,  uuid: $qTspUuid },
+            basicCredential: { username: $basicUser, password: $basicPassword, uuid: $qCredUuid },
+            signingProfile:  { name: $qSpName,   uuid: $qSpUuid }
+          }
         }
-      }
-    }' > "$tmp" || die "Failed to write JSON summary to $JSON_SUMMARY_FILE"
+      })
+    }' <<<"$existing_sets" > "$tmp" || die "Failed to write JSON summary to $JSON_SUMMARY_FILE"
 
   mv "$tmp" "$JSON_SUMMARY_FILE" || die "Failed to move the JSON summary into place at $JSON_SUMMARY_FILE"
 
@@ -2349,6 +2610,7 @@ write_json_summary() {
 
 # --- Main ---------------------------------------------------------------------
 main() {
+  install_cleanup_traps
   parse_args "$@"
   validate
   setup_connectors
@@ -2361,6 +2623,7 @@ main() {
   setup_time_quality_config
   setup_mapped_user
   setup_timestamping_role
+  setup_issuer_ca
 
   setup_tsa_set "non-qualified" "$EJBCA_CERT_PROFILE"           "$POLICY_ID_NON_QUALIFIED" ""                   NQ
   setup_tsa_set "qualified"     "$EJBCA_CERT_PROFILE_QUALIFIED" "$POLICY_ID_QUALIFIED"     "$TIME_QUALITY_UUID" Q
@@ -2371,4 +2634,7 @@ main() {
   write_json_summary
 }
 
-main "$@"
+# return succeeds only where the script is sourced, so main runs whenever bash executes it.
+if ! (return 0 2>/dev/null); then
+  main "$@"
+fi
