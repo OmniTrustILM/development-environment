@@ -1460,10 +1460,25 @@ require_recorded_prehash() {
 
 # Usage: signing_operation_attributes <attrs_json>
 signing_operation_attributes() {
-  local attrs="$1" scheme_attrs digest_attrs
+  local attrs="$1" scheme_attrs digest_attrs algorithm_attrs
   scheme_attrs=$(signature_field "$attrs" data_rsaSigScheme --signature-scheme "$SIGNATURE_SCHEME" "$DEFAULT_SIGNATURE_SCHEME") || exit 1
   digest_attrs=$(signature_field "$attrs" data_sigDigest    --signature-digest "$SIGNATURE_DIGEST" "$DEFAULT_SIGNATURE_DIGEST") || exit 1
-  jq -nc --argjson scheme_attrs "$scheme_attrs" --argjson digest_attrs "$digest_attrs" '$scheme_attrs + $digest_attrs'
+  algorithm_attrs=$(signature_algorithm_field "$attrs") || exit 1
+  jq -nc --argjson scheme_attrs "$scheme_attrs" --argjson digest_attrs "$digest_attrs" --argjson algorithm_attrs "$algorithm_attrs" \
+    '$scheme_attrs + $digest_attrs + $algorithm_attrs'
+}
+
+# signature_algorithm_field <attrs_json>
+# Core offers signatureAlgorithm in place of a scheme and digest for a post-quantum key on a v2 token.
+signature_algorithm_field() {
+  local attrs="$1" algorithm field
+  if ! offers_attribute "$attrs" signatureAlgorithm; then
+    echo '[]'
+    return 0
+  fi
+  algorithm=$(echo "$attrs" | jq -r 'first(.[] | select(.name=="signatureAlgorithm") | .content[]?.data) // empty')
+  field=$(chosen_attribute "$attrs" signatureAlgorithm "$algorithm") || exit 1
+  jq -nc --argjson field "$field" '[$field]'
 }
 
 # signature_field <attrs_json> <field_name> <option_name> <option_value> <default>
