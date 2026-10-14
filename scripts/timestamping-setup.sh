@@ -2246,9 +2246,8 @@ setup_tsp_basic_credential() {
 
 # --- Step 21: Object-scoped timestamping permissions --------------------------
 # Applied as each TSA set completes, so a completed set serves timestamps even when the next one fails.
-# Every grant targets concrete object UUIDs rather than the whole resource. The OPA method policy
-# (auth-opa-policies/policies/method_policy.rego) honors object-scoped grants for BOTH request shapes
-# on the timestamp path:
+# The OPA method policy (auth-opa-policies/policies/method_policy.rego) honors object-scoped grants
+# for BOTH request shapes on the timestamp path:
 #   - checks that carry the object UUID (tspProfiles/timestamp via SecuredUUID; tokens/detail via the
 #     SecuredParentUUID token instance) are matched by the "ActionAllowedForSpecificObject" rule;
 #   - name-based checks that carry NO uuid (tspProfiles/detail and signingProfiles/detail load by
