@@ -29,7 +29,7 @@
 #          (qualified profile links to the Time Quality configuration)
 #      19. Links the Signing Profile to the TSP Profile bidirectionally
 #      20. Creates a Basic (username/password) credential on the TSP profile, mapped to the user
-#  21. Grants object-scoped timestamping permissions to the role (applied after both sets exist)
+#      21. Grants the role object-scoped timestamping permissions on the set
 
 set -euo pipefail
 # Bash clears -e inside $(...). A function run in one therefore passes each nested failure out with || exit 1.
@@ -1076,10 +1076,20 @@ require_token_usable() {
     || die "Could not reload existing token '${TOKEN_NAME}' (${TOKEN_UUID}) at connector '${CRYPTO_CONN_NAME}'; start the connector where it is down, else ${FRESH_TOKEN_NAMES_HINT}"
   status=$(echo "$reload" | jq -r '.status.status // empty | ascii_downcase')
   case "$status" in
-    disconnected) die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is disconnected at connector '${CRYPTO_CONN_NAME}'; ${FRESH_TOKEN_NAMES_HINT}" ;;
+    disconnected)
+      awaits_first_key && { ok "token '${TOKEN_NAME}' holds no key in Core; accepting it while disconnected. If its first key fails, ${FRESH_TOKEN_NAMES_HINT}"; return 0; }
+      die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is disconnected at connector '${CRYPTO_CONN_NAME}'; ${FRESH_TOKEN_NAMES_HINT}" ;;
     deactivated)  die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is deactivated at connector '${CRYPTO_CONN_NAME}'; activate it in Core, or ${FRESH_TOKEN_NAMES_HINT}" ;;
   esac
   return 0
+}
+
+# The software provider creates a v2 token's keystore with its first key and reports the token disconnected until then.
+awaits_first_key() {
+  [[ "$CRYPTO_PROVIDER" == "software-v2" ]] || return 1
+  local keys
+  keys=$(ilm_curl POST /v1/keys -d '{"itemsPerPage":1000,"pageNumber":1,"filters":[]}') || exit 1
+  [[ "$(echo "$keys" | jq --arg t "$TOKEN_UUID" '[.cryptographicKeys[]? | select(.tokenInstanceUuid == $t)] | length')" == 0 ]]
 }
 
 # The software provider serves one token form on both registrations. It returns two different
@@ -1341,8 +1351,8 @@ setup_mapped_user() {
 # (often deep in the chain, not at the gate).
 #
 # This function only creates the role and attaches it to the user. The permissions are object-scoped
-# to the concrete TSP/signing profiles, token and token profile, which only exist after the TSA sets
-# are built -- so they are applied later by grant_timestamping_permissions().
+# to the concrete TSP/signing profiles, token and token profile, which only exist once a TSA set
+# is built -- so grant_timestamping_permissions() applies them as each set completes.
 setup_timestamping_role() {
   local _resp _existing _list _roles
 
@@ -1611,6 +1621,7 @@ setup_key_pair() {
     ok "reusing existing key '${key_name}'  $_key_uuid"
     key_details=$(ilm_curl GET "/v1/keys/${_key_uuid}")
     require_key_spec "$key_details" "$key_name" "$_key_uuid"
+    enable_key "$_key_uuid"
     _priv_uuid=$(echo "$key_details" | jq -r \
       'first(.items[] | select(.type == "Private") | .uuid) // empty')
     [[ -z "$_priv_uuid" ]] && die "Reused key ${_key_uuid} has no Private key item"
@@ -1649,10 +1660,7 @@ setup_key_pair() {
       }')")
   _key_uuid=$(require_uuid "$_resp" "${KEY_ALGORITHM} key pair '${key_name}'")
   ok "key  $_key_uuid"
-
-  log "Enabling key..."
-  ilm_curl PATCH "/v1/keys/${_key_uuid}/enable" >/dev/null
-  ok "key enabled"
+  enable_key "$_key_uuid"
 
   log "Fetching key details for private key item UUID..."
   key_details=$(ilm_curl GET "/v1/keys/${_key_uuid}")
@@ -1667,6 +1675,13 @@ setup_key_pair() {
 
   printf -v "$out_key_uuid"       '%s' "$_key_uuid"
   printf -v "$out_priv_item_uuid" '%s' "$_priv_uuid"
+}
+
+# enable_key <key_uuid>
+enable_key() {
+  log "Enabling key..."
+  ilm_curl PATCH "/v1/keys/${1}/enable" >/dev/null
+  ok "key enabled"
 }
 
 # --- Step 13: RA profile (with dynamic EJBCA profile lookup) ------------------
@@ -1923,10 +1938,7 @@ poll_certificate() {
 trust_certificate_chain() {
   local cert_uuid="$1"
   log "Trusting certificate chain for ${cert_uuid}..."
-
-  if [[ -n "$ISSUER_CA_UUID" ]]; then
-    refresh_issuer_linkage "$cert_uuid"
-  fi
+  refresh_issuer_linkage "$cert_uuid"
 
   local root_uuid
   root_uuid=$(find_root_certificate "$cert_uuid")
@@ -1938,6 +1950,7 @@ trust_certificate_chain() {
 }
 
 # refresh_issuer_linkage <cert_uuid>
+# Building the chain links the issuer now, rather than whenever Core's queued validation of the certificate runs.
 refresh_issuer_linkage() {
   ilm_curl GET "/v1/certificates/${1}/chain" >/dev/null
 }
@@ -2232,9 +2245,9 @@ setup_tsp_basic_credential() {
 }
 
 # --- Step 21: Object-scoped timestamping permissions --------------------------
-# Applied after both TSA sets exist, so every grant targets concrete object UUIDs rather than the
-# whole resource. The OPA method policy (auth-opa-policies/policies/method_policy.rego)
-# honors object-scoped grants for BOTH request shapes on the timestamp path:
+# Applied as each TSA set completes, so a completed set serves timestamps even when the next one fails.
+# The OPA method policy (auth-opa-policies/policies/method_policy.rego) honors object-scoped grants
+# for BOTH request shapes on the timestamp path:
 #   - checks that carry the object UUID (tspProfiles/timestamp via SecuredUUID; tokens/detail via the
 #     SecuredParentUUID token instance) are matched by the "ActionAllowedForSpecificObject" rule;
 #   - name-based checks that carry NO uuid (tspProfiles/detail and signingProfiles/detail load by
@@ -2243,24 +2256,21 @@ setup_tsp_basic_credential() {
 # NOTE on keys/sign: the Auth service rejects object-scoped permissions on the 'keys' resource
 # (objectAccess=false in the Auth seed -> "Resource 'Keys' does not support object access permissions"),
 # so keys/sign must be granted resource-wide as an action, not against any object uuid.
+# Usage: timestamping_permissions <tsp_uuid> <tsp_name> <sp_uuid> <sp_name>
 timestamping_permissions() {
   jq -n \
-    --arg tspNqUuid "$TSP_PROFILE_UUID_NQ" --arg tspNqName "${TSP_PROFILE_NAME_BASE}-non-qualified" \
-    --arg tspQUuid  "$TSP_PROFILE_UUID_Q"  --arg tspQName  "${TSP_PROFILE_NAME_BASE}-qualified" \
-    --arg spNqUuid  "$SIGNING_PROFILE_UUID_NQ" --arg spNqName "${SIGNING_PROFILE_NAME_BASE}-non-qualified" \
-    --arg spQUuid   "$SIGNING_PROFILE_UUID_Q"  --arg spQName  "${SIGNING_PROFILE_NAME_BASE}-qualified" \
+    --arg tspUuid   "$1"                   --arg tspName   "$2" \
+    --arg spUuid    "$3"                   --arg spName    "$4" \
     --arg tokenUuid "$TOKEN_UUID"          --arg tokenName "$TOKEN_NAME" \
     --arg tpUuid    "$TOKEN_PROFILE_UUID"  --arg tpName    "$TOKEN_PROFILE_NAME" \
     '{
       allowAllResources: false,
       resources: [
         {name:"tspProfiles", allowAllActions:false, actions:[], objects:[
-          {uuid:$tspNqUuid, name:$tspNqName, allow:["timestamp","detail"], deny:[]},
-          {uuid:$tspQUuid,  name:$tspQName,  allow:["timestamp","detail"], deny:[]}
+          {uuid:$tspUuid, name:$tspName, allow:["timestamp","detail"], deny:[]}
         ]},
         {name:"signingProfiles", allowAllActions:false, actions:[], objects:[
-          {uuid:$spNqUuid, name:$spNqName, allow:["detail"], deny:[]},
-          {uuid:$spQUuid,  name:$spQName,  allow:["detail"], deny:[]}
+          {uuid:$spUuid, name:$spName, allow:["detail"], deny:[]}
         ]},
         {name:"keys", allowAllActions:false, actions:["sign"], objects:[]},
         {name:"tokens", allowAllActions:false, actions:[], objects:[
@@ -2318,10 +2328,11 @@ merge_permissions() {
     }'
 }
 
+# Usage: grant_timestamping_permissions <tsp_uuid> <tsp_name> <sp_uuid> <sp_name>
 grant_timestamping_permissions() {
   local desired existing perm_body
 
-  desired=$(timestamping_permissions)
+  desired=$(timestamping_permissions "$@")
   existing=$(ilm_curl GET "/v1/roles/${MAPPED_USER_ROLE_UUID}/permissions") \
     || die "Could not read the current permissions of role '${MAPPED_USER_ROLE_NAME}'"
   require_scoped_grants_only "$existing"
@@ -2417,6 +2428,7 @@ setup_tsa_set() {
     set_policy_oid="$policy_oid"
     set_tq_uuid="$tq_uuid"
   fi
+  grant_timestamping_permissions "$tsp_uuid" "$tsp_name" "$sp_uuid" "$sp_name"
 
   printf -v "KEY_UUID_${g}"             '%s' "$key_uuid"
   printf -v "RA_PROFILE_UUID_${g}"      '%s' "$ra_uuid"
@@ -2642,8 +2654,6 @@ main() {
 
   setup_tsa_set "non-qualified" "$EJBCA_CERT_PROFILE"           "$POLICY_ID_NON_QUALIFIED" ""                   NQ
   setup_tsa_set "qualified"     "$EJBCA_CERT_PROFILE_QUALIFIED" "$POLICY_ID_QUALIFIED"     "$TIME_QUALITY_UUID" Q
-
-  grant_timestamping_permissions
 
   print_summary
   write_json_summary
