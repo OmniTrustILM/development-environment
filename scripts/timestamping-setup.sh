@@ -1077,7 +1077,7 @@ require_token_usable() {
   status=$(echo "$reload" | jq -r '.status.status // empty | ascii_downcase')
   case "$status" in
     disconnected)
-      awaits_first_key && { ok "token '${TOKEN_NAME}' holds no key yet; its first key creates its keystore"; return 0; }
+      awaits_first_key && { ok "token '${TOKEN_NAME}' holds no key in Core; accepting it while disconnected. If its first key fails, ${FRESH_TOKEN_NAMES_HINT}"; return 0; }
       die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is disconnected at connector '${CRYPTO_CONN_NAME}'; ${FRESH_TOKEN_NAMES_HINT}" ;;
     deactivated)  die "Existing token '${TOKEN_NAME}' (${TOKEN_UUID}) is deactivated at connector '${CRYPTO_CONN_NAME}'; activate it in Core, or ${FRESH_TOKEN_NAMES_HINT}" ;;
   esac
