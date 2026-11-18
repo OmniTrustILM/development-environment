@@ -377,8 +377,9 @@ services:
     profiles:
       - pkcs11-cryptography-provider-standalone
 
-  # pkcs11-cryptography-provider connector requires one or more proxy sidecars.
-  # In Kubernetes these share the connector's pod; compose gives each its own service.
+  # pkcs11-cryptography-provider connector requires one or more broker sidecars.
+  # In Kubernetes these share the connector's pod; compose gives each its own service,
+  # so the broker listens on all interfaces rather than on loopback.
   # The image is published from the connector repository.
   pkcs11-sidecar-softhsm:
     container_name: pkcs11-sidecar-softhsm
@@ -387,13 +388,14 @@ services:
     ports:
       - 8291:8051
     environment:
+      - PKCS11_PROXY_LISTEN=0.0.0.0:8051
       - SOFTHSM_TOKEN_LABEL=softhsm
       - SOFTHSM_USER_PIN=${SOFTHSM_USER_PIN:-1234}
       - SOFTHSM_SO_PIN=${SOFTHSM_SO_PIN:-5678}
     volumes:
       - pkcs11-softhsm-tokens:/var/lib/pkcs11-vendor/tokens
     healthcheck:
-      test: nc -z 127.0.0.1 8051
+      test: sidecar-probe /readyz
       interval: 10s
       timeout: 5s
       retries: 5

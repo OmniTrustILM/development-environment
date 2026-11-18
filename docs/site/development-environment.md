@@ -376,7 +376,7 @@ To have a complete setup, you need a technology available for the connectors. Fo
 ## PKCS#11 connector and its sidecars
 
 The `pkcs11-cryptography-provider-standalone` profile starts the PKCS#11 connector together
-with SoftHSM proxy sidecar. `pkcs11/profiles.json` lists one config profile per sidecar,
+with the SoftHSM broker sidecar. `pkcs11/profiles.json` lists one config profile per sidecar,
 and the connector offers those names as the `profile` token attribute.
 
 SoftHSM needs no additional configuration — the sidecar initializes its token on the first start.
