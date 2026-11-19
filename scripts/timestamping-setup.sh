@@ -1150,7 +1150,7 @@ pkcs11_token_attributes() {
       '{name: "token", uuid: $uuid, interfaceUuid: $iface, attributes: [$profile]}')") || exit 1
   # Each option stores a broker route and names its token "<label>, serial <serial>" in its reference.
   matches=$(echo "$offered" | jq -c --arg label "$PKCS11_TOKEN" \
-    '[.[] | select(.reference == $label or (.reference // "" | startswith($label + ", serial ")))]')
+    '[.[] | select(.reference == $label or ([(.reference // "") | capture("^(?<l>.*), serial ").l] == [$label]))]')
   case "$(echo "$matches" | jq 'length')" in
     1) ;;
     0) die "Profile '${PKCS11_PROFILE}' offers no token labelled '${PKCS11_TOKEN}'. Offered: $(echo "$offered" | jq -c '[.[].reference]')" ;;
