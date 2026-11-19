@@ -1148,7 +1148,7 @@ pkcs11_token_attributes() {
   offered=$(ilm_curl POST "/v2/connectors/${CRYPTO_CONN_UUID}/callback" -d \
     "$(jq -nc --arg uuid "$token_attr_uuid" --arg iface "$iface_uuid" --argjson profile "$profile_attr" \
       '{name: "token", uuid: $uuid, interfaceUuid: $iface, attributes: [$profile]}')") || exit 1
-  # Each option stores a broker route and names its token "<label>, serial <serial>" in its reference.
+  # Each option stores a broker route and names its token in its reference: "<label>, serial <serial>", or "<label>" for a token without a serial.
   matches=$(echo "$offered" | jq -c --arg label "$PKCS11_TOKEN" \
     '[.[] | select(.reference == $label or ([(.reference // "") | capture("^(?<l>.*), serial ").l] == [$label]))]')
   case "$(echo "$matches" | jq 'length')" in
