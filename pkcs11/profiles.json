@@ -1,7 +1,6 @@
 [
   {
     "name": "softhsm",
-    "proxyAddress": "pkcs11-sidecar-softhsm:8051",
-    "configId": "softhsm-default"
+    "endpoint": "pkcs11-sidecar-softhsm:8051"
   }
 ]

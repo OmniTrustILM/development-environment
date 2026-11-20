@@ -60,8 +60,8 @@ PORT_TIMESTAMP_FORMATTING="8270"
 #   software-v2 - software-cryptography-provider registered as a v2 connector
 #   pkcs11      - pkcs11-cryptography-provider (v2 only)
 CRYPTO_PROVIDER="software-v2"
-PKCS11_PROFILE="softhsm"      # config profile, which names the proxy sidecar
-PKCS11_TOKEN="softhsm"        # token label, as the token's PKCS#11 URI states it
+PKCS11_PROFILE="softhsm"      # config profile, which names the broker sidecar
+PKCS11_TOKEN="softhsm"        # token label, as the broker reports it
 PIN_ENV="SOFTHSM_USER_PIN"    # environment variable holding the pkcs11 token user PIN
 
 # Attributes exposed by the corresponding --crypto-provider connector.
@@ -253,7 +253,7 @@ Cryptography provider options:
                               software-v1  software-cryptography-provider (v1 connector)
                               software-v2  software-cryptography-provider (v2 connector)
                               pkcs11       pkcs11-cryptography-provider   (v2-only connector)
-  --pkcs11-profile NAME       pkcs11 config profile, specifying the proxy sidecar  (default: softhsm)
+  --pkcs11-profile NAME       pkcs11 config profile, specifying the broker sidecar (default: softhsm)
   --pkcs11-token LABEL        pkcs11 token label (default: softhsm)
   --pin-env VAR               env. variable with pkcs11 token user PIN (default: SOFTHSM_USER_PIN)
 
@@ -1134,21 +1134,9 @@ software_token_attributes() {
     '[$action, $name, $code] + (if $options == "" then [] else [$options | fromjson] end)'
 }
 
-# percent_decode TEXT
-percent_decode() {
-  local text="${1//\\/\\\\}"
-  printf '%b' "${text//%/\\x}"
-}
-
-# pkcs11_uri_token_label URI
-pkcs11_uri_token_label() {
-  percent_decode "$(jq -rn --arg uri "$1" \
-    '$uri | ltrimstr("pkcs11:") | split("?")[0] | split(";")[] | select(startswith("token=")) | ltrimstr("token=")')"
-}
-
-# A pkcs11 token is addressed by its config profile (ref proxy sidecar), and PKCS#11 URI of a token.
+# A pkcs11 token is addressed by its config profile, which names the broker sidecar, and the broker route of a token.
 pkcs11_token_attributes() {
-  local token_attr_defs profile_attr token_attr_uuid iface_uuid offered item label matches token_attr pin_attr
+  local token_attr_defs profile_attr token_attr_uuid iface_uuid offered matches token_attr pin_attr
 
   log "Fetching pkcs11 token attribute definitions..."
   token_attr_defs=$(ilm_curl GET "/v1/tokens/${CRYPTO_CONN_UUID}/attributes") || exit 1
@@ -1160,17 +1148,13 @@ pkcs11_token_attributes() {
   offered=$(ilm_curl POST "/v2/connectors/${CRYPTO_CONN_UUID}/callback" -d \
     "$(jq -nc --arg uuid "$token_attr_uuid" --arg iface "$iface_uuid" --argjson profile "$profile_attr" \
       '{name: "token", uuid: $uuid, interfaceUuid: $iface, attributes: [$profile]}')") || exit 1
-  matches="[]"
-  while IFS= read -r item; do
-    label=$(pkcs11_uri_token_label "$(echo "$item" | jq -r '.data')") || exit 1
-    if [[ "$label" == "$PKCS11_TOKEN" ]]; then
-      matches=$(echo "$matches" | jq -c --argjson item "$item" '. + [$item]')
-    fi
-  done < <(echo "$offered" | jq -c '.[]')
+  # Each option stores a broker route and names its token in its reference: "<label>, serial <serial>", or "<label>" for a token without a serial.
+  matches=$(echo "$offered" | jq -c --arg label "$PKCS11_TOKEN" \
+    '[.[] | select(.reference == $label or ([(.reference // "") | capture("^(?<l>.*), serial ").l] == [$label]))]')
   case "$(echo "$matches" | jq 'length')" in
     1) ;;
-    0) die "Profile '${PKCS11_PROFILE}' offers no token labelled '${PKCS11_TOKEN}'. Offered: $(echo "$offered" | jq -c '[.[].data]')" ;;
-    *) die "Profile '${PKCS11_PROFILE}' offers more than one token labelled '${PKCS11_TOKEN}': $(echo "$matches" | jq -c '[.[].data]')" ;;
+    0) die "Profile '${PKCS11_PROFILE}' offers no token labelled '${PKCS11_TOKEN}'. Offered: $(echo "$offered" | jq -c '[.[].reference]')" ;;
+    *) die "Profile '${PKCS11_PROFILE}' offers more than one token labelled '${PKCS11_TOKEN}': $(echo "$matches" | jq -c '[.[].reference]')" ;;
   esac
 
   token_attr=$(request_attribute "$token_attr_defs" "token" "$(echo "$matches" | jq -c '[.[0] | {data, reference}]')") || exit 1
