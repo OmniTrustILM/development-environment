@@ -131,7 +131,7 @@ Create a `.env` file in the root of the repository and update the values. The `.
 
 If you are using self-signed or not publicly trusted certificates, add the CA certificate to the trusted certificates in Docker. Add the CA certificate to the `./secrets/trusted_certificates.pem` file and it will be automatically mounted into the `auth` container, the service that verifies client certificates.
 
-The file contains CA certificates in the PEM format. You can add multiple certificates to the file. The repository already tracks this file, seeded with the ILM Dummy Root CA, so a fresh clone starts with a valid PEM bundle in place. The legacy CZERTAINLY Dummy Root CA stays in the bundle for a transition period, until setups that still authenticate with the CZERTAINLY Administrator certificate move to the ILM one.
+The file contains CA certificates in the PEM format. You can add multiple certificates to the file. The repository already tracks this file, seeded with the ILM Dummy Root CA, so a fresh clone starts with a valid PEM bundle in place. The legacy CZERTAINLY Dummy Root CA stays in the bundle for a transition period.
 
 :::warning[Create the certificates file before the first start]
 
