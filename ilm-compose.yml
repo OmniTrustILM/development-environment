@@ -519,6 +519,24 @@ services:
       - timestamp-formatting-connector-standalone
       - all
 
+  pades-formatting-connector:
+    container_name: pades-formatting-connector
+    image: ilm-pades-formatting-connector
+    build:
+      context: ${ILM_SOURCES_BASE_DIR}/ades-formatting-connector
+      dockerfile: pades/Dockerfile
+    restart: unless-stopped
+    ports:
+      - 8271:8080
+    healthcheck:
+      test: wget -O - http://localhost:8080/v2/health/liveness | grep -q '{"status":"UP"}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - pades-formatting-connector-standalone
+      - all
+
   webhook-notification-provider:
     container_name: webhook-notification-provider
     image: ilm-webhook-notification-provider
